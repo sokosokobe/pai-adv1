@@ -1,0 +1,44 @@
+[project]
+name = "pai-adv1"
+version = "0.1.0"
+description = "Isaac Sim 6.1 experiments"
+requires-python = ">=3.12,<3.13"
+# Isaac Sim 本体（isaacsim==6.1.0.0）と torch は NVIDIA のインデックスから別途導入済みの前提
+dependencies = [
+    "nvidia-ml-py",
+    "psutil",
+    "pillow",
+]
+
+[dependency-groups]
+# 導入: .venv\Scripts\python.exe -m pip install --group dev
+dev = [
+    "pytest",
+    "ruff",
+]
+
+# ------------------------------------------------------------
+# pytest
+#   普段の `pytest` では Isaac Sim が必要なテスト（isaac マーカー）を除外する。
+#   明示的に実行する場合は `pytest -m isaac`。
+# ------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-m", "not isaac", "--strict-markers", "-ra"]
+markers = [
+    "isaac: Isaac Sim の起動が必要なテスト（遅い・GPU 必須）。`pytest -m isaac` で実行",
+]
+
+# ------------------------------------------------------------
+# ruff
+# ------------------------------------------------------------
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+extend-exclude = ["outputs"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["smoke_test"]
