@@ -2,7 +2,7 @@
 
 - **期限**：2026-10-11
 - **目的**：設計書（`docs/design.md`）を書く前に、技術的な不確実性を潰す。各 Issue の結果をもとに設計を固める
-- **合計の目安**：約13.5時間
+- **合計の目安**：約14時間
 
 ## 登録方法（Claude Code への依頼用）
 
@@ -61,7 +61,9 @@ RidgebackFranka を移動ロボットとして使えるかを確認し、台車�
 
 ### やること
 
-- `Clearpath/RidgebackFranka/ridgeback_franka.usd`（Isaac Sim のアセットの `Robots` 配下）を headless で読み込む
+- RidgebackFranka を headless で読み込む。Isaac Sim 6.1 のアセットには次の2種類があるので、両方を読み込んで違い（関節構成、物理の設定など）を比べ、どちらを使うかを決める
+  - `Robots/Clearpath/RidgebackFranka/ridgeback_franka.usd`（従来の配置）
+  - `Robots_Multiphysics/Clearpath/RidgebackFranka/ridgeback_franka.usda`（6.1 の Franka のサンプルはこちらの系統を使っている）
 - 全関節の名前・種類・可動範囲・駆動方式（位置指令か速度指令か、ゲイン）を一覧にする。12自由度の内訳（台車3＋アーム7＋指2を想定）を確認する
 - 台車の3自由度（x, y, 向き）に指令を与え、目標の姿勢へ移動させる。位置指令と速度指令のどちらが扱いやすいかを比較する
 - 到達精度と所要時間を計測する（例：1m 前進、90°回転、斜め移動の3パターン）
@@ -86,8 +88,8 @@ RidgebackFranka のアームで、グリッパーを目標の位置・姿勢へ�
 
 ### やること
 
-- Isaac Sim 6.1 で推奨される動作計画の手段を調べる（Lula の RMPflow / RRT / 逆運動学、Motion Generation（Experimental）、cuRobo など）。非推奨の API は候補から外す
-- Franka 単体用の設定ファイルが RidgebackFranka のアームにそのまま使えるかを確認する（関節名の対応、台車の関節の扱い、アームの根元の位置の渡し方）
+- Isaac Sim 6.1 で推奨される動作計画の手段を調べる（cuMotion（`isaacsim.robot_motion.cumotion`。6.1 の Pick and Place サンプルが使用）、Motion Generation（Experimental）、cuRobo など）。非推奨の API は候補から外す（Lula（`isaacsim.robot_motion.lula`）は 6.1 では `extsDeprecated/` 配下）
+- Franka 単体用の設定ファイルが RidgebackFranka のアームにそのまま使えるかを確認する（関節名の対応、台車の関節の扱い、アームの根元の位置の渡し方）。cuMotion に同梱されているロボットの設定は `franka` と `ur10` のみ
 - 台車を原点以外の位置・向きに置いた状態で、机の上の目標点（5点程度）へグリッパーを移動させ、位置の誤差と所要時間を計測する
 - 台車を動かした後でも、正しく目標へ到達できることを確認する（根元の位置の更新）
 
