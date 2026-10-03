@@ -49,7 +49,7 @@ extend-exclude = ["outputs"]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "TID251"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["restorebot", "smoke_test"]
+known-first-party = ["experiments", "restorebot", "smoke_test"]
 
 # Isaac Sim への依存の分離（CLAUDE.md「設計のルール」）
 #   isaacsim / omni / pxr / carb の import は原則禁止し、
