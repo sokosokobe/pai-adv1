@@ -126,6 +126,15 @@ class Camera:
         Image.fromarray(np.ascontiguousarray(rgb.numpy()[:, :, :3], dtype=np.uint8)).save(out_path)
         return out_path
 
+    def capture(self, out_path: Path) -> bool:
+        """今ある最新の RGB 画像を保存する（シミュレーションは進めない。制御ループ中の連番画像用）。"""
+        rgb, _ = self._sensor.get_data("rgb")
+        if rgb is None:
+            return False
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(np.ascontiguousarray(rgb.numpy()[:, :, :3], dtype=np.uint8)).save(out_path)
+        return True
+
 
 def play_and_warmup(simulation_app, steps: int = 30) -> None:
     app_utils.play()

@@ -15,6 +15,7 @@ from __future__ import annotations
 import isaacsim.robot_motion.experimental.motion_generation as mg
 import numpy as np
 import warp as wp
+from isaacsim.core.experimental.objects import Cone, Cylinder, Mesh
 from isaacsim.core.experimental.prims import Articulation, XformPrim
 from isaacsim.robot_motion.cumotion import CumotionWorldInterface, load_cumotion_supported_robot
 from pxr import Usd, UsdGeom
@@ -61,6 +62,14 @@ def set_robot_configuration(simulation_app, art: Articulation, base_pose2d, step
         simulation_app.update()
 
 
+def _obstacle_strategy() -> mg.ObstacleStrategy:
+    """6.1 の Pick and Place サンプルと同じ近似（メッシュ・円錐・円柱は向き付きの箱、余裕 1cm）。"""
+    strategy = mg.ObstacleStrategy()
+    for shape in (Mesh, Cone, Cylinder):
+        strategy.set_default_configuration(shape, mg.ObstacleConfiguration("obb", 0.01))
+    return strategy
+
+
 def _pose_wp(position, quat_wxyz) -> tuple[wp.array, wp.array]:
     return (
         wp.array(np.asarray([position], dtype=np.float32), dtype=wp.float32, device="cpu"),
@@ -92,7 +101,7 @@ class ArmPlanning:
         self.world_interface = CumotionWorldInterface(device="cpu")
         self.binding = mg.WorldBinding(
             world_interface=self.world_interface,
-            obstacle_strategy=mg.ObstacleStrategy(),
+            obstacle_strategy=_obstacle_strategy(),
             tracked_prims=objects,
             tracked_collision_api=mg.TrackableApi.PHYSICS_COLLISION,
         )
@@ -139,6 +148,16 @@ class ArmPlanning:
     def _base_box_world_pose(self) -> tuple[tuple, tuple]:
         base_pos, base_q = rs.world_pose(self.base)
         return compose_pose((tuple(base_pos), tuple(base_q)), (tuple(self.base_box_center_local), (1.0, 0.0, 0.0, 0.0)))
+
+    def set_obstacles_enabled(self, prim_path: str, enabled: bool) -> None:
+        """prim_path 以下の追跡中の障害物を有効／無効にする（掴む物体を一時的に外すため）。"""
+        root = prim_path.rstrip("/")
+        paths = [p for p in self.tracked_prims if p == root or p.startswith(root + "/")]
+        if not paths:
+            raise ValueError(f"追跡中の障害物に {prim_path} がありません")
+        self.world_interface.update_obstacle_enables(
+            prim_paths=paths, enabled_array=wp.array([enabled] * len(paths), dtype=wp.bool, device="cpu")
+        )
 
     def arm_base_pose(self) -> tuple[np.ndarray, np.ndarray]:
         """cuMotion に渡すロボットの根元（panda_link0）のワールド姿勢。"""
