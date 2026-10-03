@@ -24,8 +24,6 @@
 | 全チェック（＋Isaac Sim 統合テスト） | `.\scripts\check.ps1 -Sim` |
 | スモークテスト | `.venv\Scripts\python.exe scripts\smoke_test.py` |
 
-`check.ps1` は Issue #1 で作成する。それまでは `ruff` と `pytest` を直接実行する。
-
 ## 作業の進め方（必須）
 
 1. **Issue を読む**：`gh issue view <番号>` で目的と完了条件を確認し、関連するドキュメントを読む

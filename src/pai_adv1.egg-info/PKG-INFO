@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: pai-adv1
+Version: 0.1.0
+Summary: Isaac Sim 6.1 experiments
+Requires-Python: <3.13,>=3.12
+Requires-Dist: nvidia-ml-py
+Requires-Dist: psutil
+Requires-Dist: pillow

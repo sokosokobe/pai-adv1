@@ -119,6 +119,9 @@ pip install "isaacsim[all,extscache]==6.1.0.0" --extra-index-url https://pypi.nv
 
 # 開発用の依存パッケージ（pyproject.toml の dev グループ）
 pip install --group dev
+
+# 本プロジェクトのパッケージ（src/restorebot）を editable install
+pip install -e .
 ```
 
 Isaac Sim の利用には、NVIDIA Omniverse License Agreement（EULA）への同意が必要です。
@@ -133,11 +136,11 @@ $env:OMNI_KIT_ACCEPT_EULA = "YES"
 # 動作確認（headless でシーンを構築し、結果を outputs/ に保存）
 .venv\Scripts\python.exe scripts\smoke_test.py
 
-# 単体テスト（Isaac Sim なし）
-.venv\Scripts\python.exe -m pytest
+# 高速チェック（ruff format --check、ruff check、単体テスト）
+.\scripts\check.ps1
 
-# Isaac Sim を使う統合テスト
-.venv\Scripts\python.exe -m pytest -m isaac
+# 全チェック（上記＋Isaac Sim を使う統合テスト）
+.\scripts\check.ps1 -Sim
 ```
 
 ---

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "pai-adv1"
 version = "0.1.0"
@@ -9,6 +13,10 @@ dependencies = [
     "psutil",
     "pillow",
 ]
+
+# src/restorebot を editable install する: .venv\Scripts\python.exe -m pip install -e .
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [dependency-groups]
 # 導入: .venv\Scripts\python.exe -m pip install --group dev
@@ -38,7 +46,21 @@ target-version = "py312"
 extend-exclude = ["outputs"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP", "SIM"]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "TID251"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["smoke_test"]
+known-first-party = ["restorebot", "smoke_test"]
+
+# Isaac Sim への依存の分離（CLAUDE.md「設計のルール」）
+#   isaacsim / omni / pxr / carb の import は原則禁止し、
+#   Isaac Sim に依存してよい場所（per-file-ignores）だけで許可する。
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"isaacsim".msg = "Isaac Sim に依存するコードは src/restorebot/sim/ に置く（core は Isaac Sim 非依存）"
+"omni".msg = "Isaac Sim に依存するコードは src/restorebot/sim/ に置く（core は Isaac Sim 非依存）"
+"pxr".msg = "Isaac Sim に依存するコードは src/restorebot/sim/ に置く（core は Isaac Sim 非依存）"
+"carb".msg = "Isaac Sim に依存するコードは src/restorebot/sim/ に置く（core は Isaac Sim 非依存）"
+
+[tool.ruff.lint.per-file-ignores]
+"src/restorebot/sim/**" = ["TID251"]
+"scripts/**" = ["TID251"]
+"tests/sim/**" = ["TID251"]

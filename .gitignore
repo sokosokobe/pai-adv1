@@ -20,6 +20,9 @@ outputs/
 *.webm
 *.gif
 
+# Claude Code の個人設定（.claude/settings.json は共有するのでコミットする）
+.claude/settings.local.json
+
 # IDE / OS
 .vscode/
 .idea/
