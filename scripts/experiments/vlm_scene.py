@@ -34,11 +34,15 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))  # experiments.* を import す�
 
 from experiments.arm_common import quat_from_yaw_wxyz  # noqa: E402
 from experiments.vlm_common import (  # noqa: E402
+    ROBOT_SHOOT_FRONT,
+    ROBOT_SHOOT_HEIGHT,
     SCENES,
     Placement,
+    choose_shoot_pose,
     draw_overlay,
     generate_scenarios,
     object_center,
+    robot_mask,
     sample_robot_poses,
     scenario_truth,
 )
@@ -60,6 +64,28 @@ STANDBY_ARM = {
     "panda_joint6": 0.892,
     "panda_joint7": 0.228,
 }
+# Franka の既定姿勢（アームを畳んだ姿勢。cuMotion / Pick and Place サンプルと同じ。arm_sim.FRANKA_DEFAULT）。
+# #10：写真を撮るときはこの姿勢にして、アームが天板の上に出ないようにする
+FOLDED_ARM = {
+    "panda_joint1": 0.012,
+    "panda_joint2": -0.568,
+    "panda_joint3": 0.0,
+    "panda_joint4": -2.811,
+    "panda_joint5": 0.0,
+    "panda_joint6": 3.037,
+    "panda_joint7": 0.741,
+}
+# #10：前方の物体に手を伸ばしたアームの姿勢（作業中の想定。物体が隠れる例を作る）。panda_joint1 = 0 で台車の正面を向く
+REACH_ARM = {
+    "panda_joint1": 0.0,
+    "panda_joint2": 0.6,
+    "panda_joint3": 0.0,
+    "panda_joint4": -1.6,
+    "panda_joint5": 0.0,
+    "panda_joint6": 2.2,
+    "panda_joint7": 0.785,
+}
+WORK_ARMS = {"standby": STANDBY_ARM, "reach": REACH_ARM}
 ROBOT_PARKED = (6.0, 0.0, 0.0)  # ロボットを写さないときの置き場所（部屋の外。天井カメラに写らない）
 WALL_HEIGHT = 2.4
 WALL_THICKNESS = 0.05
@@ -80,11 +106,24 @@ def main() -> int:
         action="store_true",
         help="RidgebackFranka を置き、ロボットが写った散らかった画像も <out>_robot/ に作る（いつもの画像には写さない）",
     )
+    parser.add_argument(
+        "--robot-aim", action="store_true", help="ロボットを、物体のどれかに向かう位置に置く（物体が隠れる例を増やす）"
+    )
+    parser.add_argument("--work-arm", choices=list(WORK_ARMS), default="standby", help="作業中のロボットのアームの姿勢")
+    parser.add_argument(
+        "--shoot",
+        action="store_true",
+        help="作業中の位置から撮影位置へ下がり、アームを畳んだロボットを写した画像も <out>_robot_shoot/ に作る",
+    )
     parser.add_argument("--gui", action="store_true", help="GUI を表示する（既定は headless）")
     args = parser.parse_args()
     out_dir: Path = args.out
     robot_dir = out_dir.with_name(out_dir.name + "_robot")
-    for d in (out_dir, robot_dir) if args.robot else (out_dir,):
+    shoot_dir = out_dir.with_name(out_dir.name + "_robot_shoot")
+    if args.shoot and not args.robot:
+        parser.error("--shoot には --robot が必要です")
+    dirs = [out_dir] + ([robot_dir] if args.robot else []) + ([shoot_dir] if args.shoot else [])
+    for d in dirs:
         (d / "overlay").mkdir(parents=True, exist_ok=True)
         (d / "depth_preview").mkdir(parents=True, exist_ok=True)
     scene = SCENES[args.scene]
@@ -100,6 +139,7 @@ def main() -> int:
     exit_code = 1
     record: dict = {}
     robot_record: dict = {}
+    shoot_record: dict = {}
     try:
         import isaacsim.core.experimental.utils.app as app_utils
         import numpy as np
@@ -201,11 +241,11 @@ def main() -> int:
             names = list(robot.dof_names)
             base_idx = [names.index(n) for n in rs.BASE_JOINTS]
 
-        def place_robot(pose) -> None:
-            """台車を pose (x, y, yaw) に置き、アームを待機姿勢にして保持する（関節の位置を直接与える）。"""
+        def place_robot(pose, arm: dict = STANDBY_ARM) -> None:
+            """台車を pose (x, y, yaw) に置き、アームを arm の姿勢にして保持する（関節の位置を直接与える）。"""
             q = robot.get_dof_positions().numpy()[0].copy()
             q[base_idx] = pose
-            for name, value in STANDBY_ARM.items():
+            for name, value in arm.items():
                 q[names.index(name)] = value
             robot.set_dof_positions(q)
             robot.set_dof_velocities(np.zeros_like(q))
@@ -254,12 +294,18 @@ def main() -> int:
             place_robot(ROBOT_PARKED)
         place_all(TIDY_LAYOUT)
         _, tidy_depth = capture("tidy")
-        if args.robot:
-            import shutil
+        import shutil
 
+        for d in dirs[1:]:
             for name in ("tidy_rgb.png", "tidy_depth.npy"):
-                shutil.copy(out_dir / name, robot_dir / name)
-            shutil.copy(out_dir / "depth_preview" / "tidy.png", robot_dir / "depth_preview" / "tidy.png")
+                shutil.copy(out_dir / name, d / name)
+            shutil.copy(out_dir / "depth_preview" / "tidy.png", d / "depth_preview" / "tidy.png")
+
+        def robot_top_z(depth_np: np.ndarray) -> float | None:
+            """深度画像から求めたロボットの最も高い所の高さ [m]（いつもの写真より 15cm 以上近い画素の最小の深度）。"""
+            mask = robot_mask(depth_np, tidy_depth)
+            return float(cam.position[2] - depth_np[mask].min()) if mask.any() else None
+
         record = {
             "scene": scene.key,
             "seed": args.seed,
@@ -280,10 +326,28 @@ def main() -> int:
         }
 
         # ---- 散らかった状態（--robot のときは、ロボットが写った画像も作る）----
-        robot_poses = sample_robot_poses(args.pairs, seed=args.seed, scene=scene) if args.robot else []
-        if args.robot:
-            robot_record = {**record, "scenarios": []}
         scenarios = generate_scenarios(args.pairs, seed=args.seed, scene=scene, **DIFFICULTIES[args.difficulty])
+        aim_points = None
+        if args.robot_aim:  # 散らかった状態での物体のどれか（今の位置）に向かう
+            rng = np.random.default_rng(args.seed + 1000)
+            aim_points = []
+            for sc in scenarios:
+                key = list(sc.placements)[int(rng.integers(len(sc.placements)))]
+                p = sc.placements[key]
+                aim_points.append((p.surface, p.x, p.y))
+        robot_poses = (
+            sample_robot_poses(args.pairs, seed=args.seed, scene=scene, aim_points=aim_points) if args.robot else []
+        )
+        if args.robot:
+            robot_record = {**record, "robot_aim": args.robot_aim, "work_arm": args.work_arm, "scenarios": []}
+        if args.shoot:
+            shoot_record = {
+                **record,
+                "robot_aim": args.robot_aim,
+                "shoot_height_m": ROBOT_SHOOT_HEIGHT,
+                "shoot_front_m": ROBOT_SHOOT_FRONT,
+                "scenarios": [],
+            }
         for sc in scenarios:
             stem = f"scene_{sc.index:02d}"
             place_all(sc.placements)
@@ -305,16 +369,35 @@ def main() -> int:
             )
             if robot is not None:
                 pose = robot_poses[sc.index]
-                place_robot(pose)
+                place_robot(pose, WORK_ARMS[args.work_arm])
                 rgb_r, depth_r = capture(stem, robot_dir)
                 draw_overlay(Image.fromarray(rgb_r), truth).save(robot_dir / "overlay" / f"{stem}.png")
                 robot_record["scenarios"].append(
                     {
                         **record["scenarios"][-1],
                         "robot_pose": list(pose),
+                        "aim": list(aim_points[sc.index]) if aim_points else None,
+                        "robot_top_z": robot_top_z(depth_r),
                         "depth_check": depth_checks(sc.placements, depth_r),
                     }
                 )
+                if args.shoot:
+                    shoot = choose_shoot_pose(pose, scene, height=ROBOT_SHOOT_HEIGHT, front=ROBOT_SHOOT_FRONT)
+                    if shoot is None:
+                        raise RuntimeError(f"{stem}：撮影位置が見つかりませんでした")
+                    place_robot(shoot, FOLDED_ARM)
+                    rgb_s, depth_s = capture(stem, shoot_dir)
+                    draw_overlay(Image.fromarray(rgb_s), truth).save(shoot_dir / "overlay" / f"{stem}.png")
+                    shoot_record["scenarios"].append(
+                        {
+                            **record["scenarios"][-1],
+                            "robot_pose": list(shoot),
+                            "working_pose": list(pose),
+                            "retreat_m": float(((shoot[0] - pose[0]) ** 2 + (shoot[1] - pose[1]) ** 2) ** 0.5),
+                            "robot_top_z": robot_top_z(depth_s),
+                            "depth_check": depth_checks(sc.placements, depth_s),
+                        }
+                    )
             print(f"[vlm_scene] {stem}: moved={list(sc.moved)}", flush=True)
         errs = [
             abs(c["measured_m"] - c["expected_m"])
@@ -325,6 +408,8 @@ def main() -> int:
         record["status"] = "ok"
         if args.robot:
             robot_record["status"] = "ok"
+        if args.shoot:
+            shoot_record["status"] = "ok"
         exit_code = 0
     except Exception as exc:
         traceback.print_exc()
@@ -334,10 +419,11 @@ def main() -> int:
         (out_dir / "truth.json").write_text(
             json.dumps(record, indent=2, ensure_ascii=False, default=float), encoding="utf-8"
         )
-        if args.robot:
-            (robot_dir / "truth.json").write_text(
-                json.dumps(robot_record, indent=2, ensure_ascii=False, default=float), encoding="utf-8"
-            )
+        for d, rec, on in ((robot_dir, robot_record, args.robot), (shoot_dir, shoot_record, args.shoot)):
+            if on:
+                (d / "truth.json").write_text(
+                    json.dumps(rec, indent=2, ensure_ascii=False, default=float), encoding="utf-8"
+                )
         print(
             f"[vlm_scene] status={record.get('status')} "
             f"depth_err_max={record.get('depth_check_max_abs_err_m')} -> {out_dir}",

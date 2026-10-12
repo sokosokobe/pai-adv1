@@ -3,12 +3,15 @@
 import json
 import math
 
+import numpy as np
 import pytest
 
 from experiments.vlm_common import (
     CEILING_CAMERA,
     HOME_V2,
     OBJECTS,
+    RESPONSE_SCHEMA_HIDDEN,
+    ROBOT_GAP,
     ROBOT_NOTE,
     ROOM_HALF,
     ROOM_V1,
@@ -20,17 +23,28 @@ from experiments.vlm_common import (
     Rect,
     aggregate,
     build_prompt,
+    choose_shoot_pose,
     cost_usd,
     draw_overlay,
+    drop_static_predictions,
     evaluate,
     generate_scenarios,
+    hidden_truth,
+    mask_overlaps_rect,
     object_center,
+    parse_hidden,
     parse_prediction,
+    points_hidden_by_mask,
     rects_overlap,
     robot_faces,
+    robot_hides_surfaces,
+    robot_image_rect,
+    robot_mask,
     robot_rect,
     sample_robot_poses,
     scenario_truth,
+    set_scores,
+    surface_image_rect,
     to_pixels,
 )
 
@@ -468,3 +482,134 @@ def test_prompt_robot_note_is_optional_and_does_not_change_default():
     assert "robot" not in default.lower()
     assert "robot" in with_note.lower()
     assert with_note.replace(ROBOT_NOTE + "\n", "") == default
+
+
+# ---- #10 ロボットに隠れた物体：撮影位置、深度による判定、VLM の hidden_objects ----
+
+
+def test_aimed_robot_poses_face_the_aimed_surface_in_line_with_the_point():
+    scene = HOME_V2
+    aims = [("desk", 0.4, 0.95), ("side_table", -1.5, -0.1), ("desk", 1.05, 0.8)]
+    poses = sample_robot_poses(3, seed=0, scene=scene, aim_points=aims)
+    for pose, (key, ax, ay) in zip(poses, aims, strict=True):
+        f = scene.surfaces[key]
+        assert robot_faces(pose, Rect(f.center, f.size))
+        # 台車の向きに直交する方向（横）の位置が、狙った点にそろっている
+        lateral = -(ax - pose[0]) * math.sin(pose[2]) + (ay - pose[1]) * math.cos(pose[2])
+        assert abs(lateral) < 1e-6
+
+
+def test_projected_rects_grow_with_height():
+    cam = HOME_V2.camera
+    low = robot_image_rect((1.0, -0.5, 0.0), cam, height=0.3)
+    high = robot_image_rect((1.0, -0.5, 0.0), cam, height=1.2)
+    assert high.size[0] > low.size[0] and high.size[1] > low.size[1]
+    desk = surface_image_rect(HOME_V2.surfaces["desk"], cam)
+    u, v = cam.project((0.8, 0.85, 0.70))
+    assert abs(desk.center[0] - u) < 1e-6 and abs(desk.center[1] - v) < 1e-6
+
+
+def test_robot_in_front_of_desk_hides_it_but_center_does_not():
+    scene = HOME_V2
+    # 机の手前（-y 側）に机の方を向いて止まった台車（隙間 10cm）。背の高い部分は画像の外側（机の方）へ伸びて写る
+    in_front_of_desk = (0.8, 0.55 - ROBOT_GAP - 0.47, math.pi / 2)
+    assert robot_hides_surfaces(in_front_of_desk, scene, height=1.2)
+    assert not robot_hides_surfaces((0.3, -0.9, 0.0), scene, height=1.2)
+
+
+def test_choose_shoot_pose_is_valid_and_closest():
+    scene = HOME_V2
+    for working in sample_robot_poses(10, seed=1, scene=scene):
+        shoot = choose_shoot_pose(working, scene, height=1.2)
+        assert shoot is not None
+        r = robot_rect(shoot)
+        hx, hy = scene.room_half
+        assert abs(r.center[0]) + r.size[0] / 2 <= hx and abs(r.center[1]) + r.size[1] / 2 <= hy
+        assert not any(rects_overlap(r, Rect(s.center, s.size)) for s in scene.surfaces.values())
+        assert not robot_hides_surfaces(shoot, scene, height=1.2)
+        assert shoot[2] == working[2]  # 向きは変えない（その場から下がるだけ）
+    # すでに隠していない位置なら、その位置のまま
+    assert choose_shoot_pose((0.3, -0.9, 0.0), scene, height=1.2) == pytest.approx((0.3, -0.9, 0.0))
+
+
+def test_robot_mask_from_depth_ignores_small_objects():
+    reference = np.full((4, 6), 2.6, dtype=np.float32)
+    current = reference.copy()
+    current[0, 0] = 2.6 - 0.10  # 物体（高さ 10cm）が置かれた
+    current[1:3, 2:4] = 2.6 - 1.0  # ロボット
+    mask = robot_mask(current, reference, margin=0.15)
+    assert mask.sum() == 4 and mask[1, 2] and not mask[0, 0]
+
+
+def test_points_hidden_by_mask():
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[2:5, 2:5] = True
+    hidden = points_hidden_by_mask(mask, {"a": (3.0, 3.0), "b": (8.0, 8.0), "c": (6.0, 3.0)}, radius_px=1.5)
+    assert hidden == {"a", "c"}  # c は半径の中にロボットの領域がかかる
+
+
+def test_mask_overlaps_rect():
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[0:2, 0:2] = True
+    assert mask_overlaps_rect(mask, Rect(center=(1.0, 1.0), size=(2.0, 2.0)))
+    assert not mask_overlaps_rect(mask, Rect(center=(7.0, 7.0), size=(2.0, 2.0)))
+
+
+def test_set_scores():
+    s = set_scores(predicted={"a", "b"}, actual={"b", "c"})
+    assert (s["tp"], s["fp"], s["fn"]) == (1, 1, 1)
+
+
+def test_prompt_and_parse_hidden_objects():
+    kwargs = {"coord_format": "pixel_xy", "width": 1280, "height": 960, "object_names": ["赤いコップ"]}
+    prompt = build_prompt(**kwargs, hidden_field=True)
+    assert "hidden_objects" in prompt and "hidden_objects" not in build_prompt(**kwargs)
+    text = json.dumps({"moved_objects": [], "hidden_objects": ["赤いコップ"]}, ensure_ascii=False)
+    assert parse_hidden(text) == ["赤いコップ"]
+    assert parse_prediction(text, coord_format="pixel_xy", width=1280, height=960) == []
+    assert parse_hidden(json.dumps({"moved_objects": []})) == []  # 項目がなければ空
+    assert "hidden_objects" in RESPONSE_SCHEMA_HIDDEN["properties"]
+
+
+def test_hidden_truth_from_depth_check():
+    depth_check = {
+        "a": {"measured_m": 1.80, "expected_m": 1.80},
+        "b": {"measured_m": 1.25, "expected_m": 1.80},  # 上に何か（ロボット）がある
+        "c": {"measured_m": 1.82, "expected_m": 1.80},
+    }
+    assert hidden_truth(depth_check, tol=0.05) == {"b"}
+
+
+def test_robot_image_rect_front_extension_for_arm():
+    cam = HOME_V2.camera
+    pose = (0.3, -0.9, 0.0)  # +x を向く
+    base = robot_image_rect(pose, cam, height=1.05)
+    with_arm = robot_image_rect(pose, cam, height=1.05, front=0.65)
+    # 前（+x、画像の右）にだけ広がる
+    assert with_arm.center[0] + with_arm.size[0] / 2 > base.center[0] + base.size[0] / 2
+    assert with_arm.center[0] - with_arm.size[0] / 2 == pytest.approx(base.center[0] - base.size[0] / 2)
+
+
+def test_choose_shoot_pose_with_arm_front_extension_keeps_arm_off_surfaces():
+    scene = HOME_V2
+    for working in sample_robot_poses(10, seed=2, scene=scene):
+        shoot = choose_shoot_pose(working, scene, height=1.05, front=0.65)
+        assert shoot is not None
+        assert not robot_hides_surfaces(shoot, scene, height=1.05, front=0.65)
+
+
+def test_surface_image_rect_inset_shrinks_to_placeable_area():
+    cam = HOME_V2.camera
+    desk = HOME_V2.surfaces["desk"]
+    full = surface_image_rect(desk, cam)
+    inner = surface_image_rect(desk, cam, inset=0.04)
+    px = 0.04 / cam.meters_per_pixel(desk.z)
+    assert inner.size[0] == pytest.approx(full.size[0] - 2 * px)
+    assert inner.size[1] == pytest.approx(full.size[1] - 2 * px)
+    assert inner.center == pytest.approx(full.center)
+
+
+def test_drop_static_predictions_removes_moves_with_same_current_and_target():
+    still = PredictedMove("a", "", (100.0, 100.0), "", (105.0, 103.0))  # 今の位置と戻し先がほぼ同じ
+    moved = PredictedMove("b", "", (100.0, 100.0), "", (300.0, 100.0))
+    assert drop_static_predictions([still, moved], min_move_px=15.0) == [moved]

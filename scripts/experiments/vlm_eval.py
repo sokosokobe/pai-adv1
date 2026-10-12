@@ -33,12 +33,16 @@ from PIL import Image  # noqa: E402
 from experiments.vlm_clients import make_client  # noqa: E402
 from experiments.vlm_common import (  # noqa: E402
     SCENES,
+    PredictedMove,
     ScenarioTruth,
     aggregate,
     build_prompt,
     cost_usd,
     draw_overlay,
+    drop_static_predictions,
     evaluate,
+    hidden_truth,
+    parse_hidden,
     parse_prediction,
 )
 
@@ -78,14 +82,27 @@ def main() -> int:
     parser.add_argument("--match-tol-px", type=float, default=40.0)
     parser.add_argument("--target-tol-px", type=float, default=40.0)
     parser.add_argument(
+        "--hidden-field",
+        action="store_true",
+        help="#10：応答に hidden_objects（ロボットなどに隠れて見えない物体）を加えるプロンプトにする",
+    )
+    parser.add_argument(
         "--robot-note",
         action="store_true",
         help="プロンプトに「ロボットが写ることがあるが片付けの対象ではない」を加える",
+    )
+    parser.add_argument(
+        "--rescore-drop-static-px",
+        type=float,
+        default=None,
+        help="API を呼ばず、保存した応答から、今の位置と戻し先がこの距離 [px] 未満の予測を除いて採点し直す（#10）",
     )
     args = parser.parse_args()
 
     record, items = load_dataset(args.dataset)
     items = items[: args.limit] if args.limit else items
+    if args.rescore_drop_static_px is not None:
+        return rescore(args, items)
     cam = record["camera"]
     width, height = cam["width"], cam["height"]
     before_png = (args.dataset / "tidy_rgb.png").read_bytes()
@@ -109,6 +126,7 @@ def main() -> int:
                 height=height,
                 object_names=names,
                 robot_note=args.robot_note,
+                hidden_field=args.hidden_field,
             )
             (out_dir / f"prompt_{client.coord_format}_{mode}.txt").write_text(prompt, encoding="utf-8")
             for s, truth in items:
@@ -133,6 +151,10 @@ def main() -> int:
                     )
                     try:
                         preds = parse_prediction(res.text, coord_format=client.coord_format, width=width, height=height)
+                        if args.hidden_field:
+                            by_name = {o.name: o.key for o in objects}
+                            row["hidden_names"] = parse_hidden(res.text)
+                            row["hidden_predicted"] = sorted({by_name.get(n, n) for n in row["hidden_names"]})
                     except ValueError as exc:
                         row["parse_error"] = str(exc)
                 except Exception as exc:  # API のエラーも記録して続ける
@@ -146,6 +168,7 @@ def main() -> int:
                     target_tol_px=args.target_tol_px,
                 )
                 row["predictions"] = [asdict(p) for p in preds] if preds is not None else None
+                row["hidden_actual"] = sorted(hidden_truth(s["depth_check"]))
                 row["score"] = asdict(score)
                 with results_path.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -161,6 +184,44 @@ def main() -> int:
                     flush=True,
                 )
 
+    summarize(results_path, out_dir)
+    return 0
+
+
+def rescore(args, items) -> int:
+    """保存した応答（results.jsonl）を、静止した予測を除いて採点し直し、<run>_static<px>/ に集計を書く。"""
+    src = args.eval_root / args.run / "results.jsonl"
+    out_dir = args.eval_root / f"{args.run}_static{int(args.rescore_drop_static_px)}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    truths = {s["index"]: truth for s, truth in items}
+    rows = []
+    for line in src.read_text(encoding="utf-8").splitlines():
+        r = json.loads(line)
+        preds = None
+        if r.get("predictions") is not None:
+            preds = [
+                PredictedMove(
+                    name=x["name"],
+                    current_location=x["current_location"],
+                    current_px=tuple(x["current_px"]),
+                    target_location=x["target_location"],
+                    target_px=tuple(x["target_px"]),
+                )
+                for x in r["predictions"]
+            ]
+            preds = drop_static_predictions(preds, min_move_px=args.rescore_drop_static_px)
+        score = evaluate(
+            preds,
+            truths[r["scenario"]],
+            use_names=MODES[r["mode"]],
+            match_tol_px=args.match_tol_px,
+            target_tol_px=args.target_tol_px,
+        )
+        kept = [asdict(x) for x in preds] if preds is not None else None
+        rows.append({**r, "predictions": kept, "score": asdict(score)})
+    results_path = out_dir / "results.jsonl"
+    lines = [json.dumps(r, ensure_ascii=False) for r in rows]
+    results_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     summarize(results_path, out_dir)
     return 0
 
@@ -184,6 +245,10 @@ def summarize(results_path: Path, out_dir: Path) -> None:
             "mode": mode,
             **aggregate(scores),
             "api_errors": sum("api_error" in r for r in rs),
+            # #10：隠れて見えない物体（hidden_objects）の判定。正解は depth_check から（hidden_actual）
+            "hidden_actual": sum(len(r.get("hidden_actual", [])) for r in rs),
+            "hidden_tp": sum(len(set(r.get("hidden_predicted", [])) & set(r.get("hidden_actual", []))) for r in rs),
+            "hidden_fp": sum(len(set(r.get("hidden_predicted", [])) - set(r.get("hidden_actual", []))) for r in rs),
             "latency_s_median": statistics.median(lat) if lat else None,
             "latency_s_max": max(lat) if lat else None,
             "cost_usd_mean": statistics.mean(costs) if costs else None,

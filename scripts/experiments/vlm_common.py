@@ -16,7 +16,7 @@ import math
 import re
 import time
 import unicodedata
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
@@ -342,7 +342,10 @@ SCENES = {s.key: s for s in (ROOM_V1, HOME_V2)}
 # ------------------------------------------------------------
 # ロボット（今の画像にだけ写す。いつもの写真を撮るときはロボットは部屋にいない想定）
 # ------------------------------------------------------------
-ROBOT_HALF_SIZE = (0.47, 0.40)  # 台車の前後・左右の半分の長さ [m]（前後は #2 の実測 0.466m、左右は推定）
+ROBOT_HALF_SIZE = (
+    0.47,
+    0.40,
+)  # 台車の前後・左右の半分の長さ [m]（#2 の実測 0.466m。#10 で深度から前後 ±0.44、左右 ±0.39）
 ROBOT_GAP = 0.10  # 台車の前面と家具の隙間 [m]（#3：机は台車の前面から 10cm 程度に寄せる）
 
 
@@ -368,16 +371,57 @@ def robot_faces(pose: Sequence[float], furniture: Rect) -> bool:
     return abs(x - furniture.center[0]) <= hx and abs(y - furniture.center[1]) <= hy
 
 
+def _pose_facing(f: Surface, side: int, lateral: float) -> tuple[float, float, float]:
+    """家具 f の side 側（0: -x、1: +x、2: -y、3: +y）に、家具の方を向いて止まった姿勢。lateral は横方向の座標。"""
+    d = ROBOT_HALF_SIZE[0] + ROBOT_GAP
+    fx, fy, fw, fh = f.center[0], f.center[1], f.size[0], f.size[1]
+    if side == 0:
+        return (fx - (fw / 2 + d), lateral, 0.0)
+    if side == 1:
+        return (fx + (fw / 2 + d), lateral, math.pi)
+    if side == 2:
+        return (lateral, fy - (fh / 2 + d), math.pi / 2)
+    return (lateral, fy + (fh / 2 + d), -math.pi / 2)
+
+
+def _robot_pose_ok(pose: Sequence[float], scene: SceneSpec) -> bool:
+    """部屋の中に収まり、家具と重ならないか。"""
+    r = robot_rect(pose)
+    hx, hy = scene.room_half
+    inside = abs(pose[0]) + r.size[0] / 2 <= hx and abs(pose[1]) + r.size[1] / 2 <= hy
+    return inside and not any(rects_overlap(r, Rect(g.center, g.size)) for g in scene.surfaces.values())
+
+
 def sample_robot_poses(
-    n: int, *, seed: int, scene: SceneSpec, max_tries: int = 1000
+    n: int,
+    *,
+    seed: int,
+    scene: SceneSpec,
+    max_tries: int = 1000,
+    aim_points: Sequence[tuple[str, float, float] | None] | None = None,
 ) -> list[tuple[float, float, float]]:
-    """家具のどれかの正面に、家具の方を向いて止まった台車の姿勢 (x, y, yaw) を n 個作る（作業中の想定）。"""
+    """家具のどれかの正面に、家具の方を向いて止まった台車の姿勢 (x, y, yaw) を n 個作る（作業中の想定）。
+
+    aim_points を与えると、i 番目の姿勢は (面, x, y) の点に向かう：その面の正面のうち置ける側を選び、
+    台車の横方向の位置を点にそろえる（アームが点の上に来やすく、物体が隠れる例を作れる）。
+    """
     rng = np.random.default_rng(seed)
     furniture = list(scene.surfaces.values())
     hx_room, hy_room = scene.room_half
     d = ROBOT_HALF_SIZE[0] + ROBOT_GAP
     poses = []
-    for _ in range(n):
+    for i in range(n):
+        aim = aim_points[i] if aim_points is not None else None
+        if aim is not None:
+            key, ax, ay = aim
+            for side in rng.permutation(4).tolist():
+                pose = _pose_facing(scene.surfaces[key], side, ay if side in (0, 1) else ax)
+                if _robot_pose_ok(pose, scene):
+                    poses.append(pose)
+                    break
+            else:
+                raise RuntimeError(f"{key} の {(ax, ay)} に向かう置き場所が見つかりませんでした")
+            continue
         for _ in range(max_tries):
             f = furniture[int(rng.integers(len(furniture)))]
             side = int(rng.integers(4))  # 0: 家具の -x 側、1: +x 側、2: -y 側、3: +y 側
@@ -398,6 +442,156 @@ def sample_robot_poses(
         else:
             raise RuntimeError("ロボットの置き場所が見つかりませんでした")
     return poses
+
+
+# ------------------------------------------------------------
+# #10 ロボットに隠れた物体：撮影位置の選び方と、深度による隠れの判定
+# ------------------------------------------------------------
+SHOOT_MARGIN_PX = 10.0  # 画像上で、ロボットと天板の間に空ける余白 [px]
+# 物体を置ける範囲：天板の縁から PLACE_MARGIN ＋ 最も細い物体の半径（2cm）だけ内側。撮り直しの判定に使う
+PLACEABLE_INSET = PLACE_MARGIN + 0.02
+# 写真を撮るときのロボット（アームを Franka の既定姿勢にした状態）の大きさ。#10 で深度画像から実測した値に余白を足す
+#   高さ：実測 1.00m → 1.05m
+#   前方：既定姿勢のアームは台車の前面より前に出る（台車の中心から 0.62m）→ 0.65m
+ROBOT_SHOOT_HEIGHT = 1.05
+ROBOT_SHOOT_FRONT = 0.65
+
+
+def _bbox_rect(points: Sequence[tuple[float, float]]) -> Rect:
+    us, vs = [p[0] for p in points], [p[1] for p in points]
+    return Rect(center=((min(us) + max(us)) / 2, (min(vs) + max(vs)) / 2), size=(max(us) - min(us), max(vs) - min(vs)))
+
+
+def robot_image_rect(pose: Sequence[float], camera: DownCamera, *, height: float, front: float | None = None) -> Rect:
+    """ロボットを「台車の外形 × 高さ」の箱とみなし、天井カメラの画像に写る範囲（外接長方形）[px]。
+
+    背の高い部分ほど画像の外側へ伸びて写る（遠近法）ので、箱の上面と底面の四隅を投影して囲む。
+    front を与えると、箱の前端を台車の中心から front [m] にする（台車の前面より前に出るアームの分）。
+    """
+    hx, hy = ROBOT_HALF_SIZE
+    c, s = math.cos(pose[2]), math.sin(pose[2])
+    corners = [
+        (pose[0] + f * c - lat * s, pose[1] + f * s + lat * c, z)
+        for f in (-hx, max(hx, front) if front is not None else hx)
+        for lat in (-hy, hy)
+        for z in (0.0, height)
+    ]
+    return _bbox_rect([camera.project(p) for p in corners])
+
+
+def surface_image_rect(surface: Surface, camera: DownCamera, *, inset: float = 0.0) -> Rect:
+    """家具の天板が天井カメラの画像に写る範囲 [px]。inset [m] を与えると、天板の縁から内側へ縮めた範囲。"""
+    hx, hy = surface.size[0] / 2 - inset, surface.size[1] / 2 - inset
+    corners = [
+        (surface.center[0] + sx * hx, surface.center[1] + sy * hy, surface.z) for sx in (-1, 1) for sy in (-1, 1)
+    ]
+    return _bbox_rect([camera.project(c) for c in corners])
+
+
+def robot_hides_surfaces(
+    pose: Sequence[float],
+    scene: SceneSpec,
+    *,
+    height: float,
+    front: float | None = None,
+    margin_px: float = SHOOT_MARGIN_PX,
+) -> bool:
+    """天井カメラの画像の上で、ロボットがどれかの天板に重なるか（物体を隠すおそれがあるか）。"""
+    robot = robot_image_rect(pose, scene.camera, height=height, front=front)
+    for s in scene.surfaces.values():
+        top = surface_image_rect(s, scene.camera)
+        if rects_overlap(robot, Rect(top.center, (top.size[0] + 2 * margin_px, top.size[1] + 2 * margin_px))):
+            return True
+    return False
+
+
+def choose_shoot_pose(
+    current: Sequence[float],
+    scene: SceneSpec,
+    *,
+    height: float,
+    front: float | None = None,
+    step: float = 0.05,
+    margin_px: float = SHOOT_MARGIN_PX,
+) -> tuple[float, float, float] | None:
+    """写真を撮るときの台車の姿勢：天板を隠さない位置のうち、今の位置に最も近いもの。向きは変えない。
+
+    今の位置がすでに条件を満たせば、そのまま返す。見つからなければ None。
+    """
+    current = (float(current[0]), float(current[1]), float(current[2]))
+
+    def ok(pose) -> bool:
+        hides = robot_hides_surfaces(pose, scene, height=height, front=front, margin_px=margin_px)
+        return _robot_pose_ok(pose, scene) and not hides
+
+    if ok(current):
+        return current
+    hx, hy = scene.room_half
+    best, best_d = None, math.inf
+    for x in np.arange(-hx, hx + 1e-9, step):
+        for y in np.arange(-hy, hy + 1e-9, step):
+            pose = (float(x), float(y), current[2])
+            d = math.hypot(x - current[0], y - current[1])
+            if d < best_d and ok(pose):
+                best, best_d = pose, d
+    return best
+
+
+def robot_mask(current_depth: np.ndarray, reference_depth: np.ndarray, *, margin: float = 0.15) -> np.ndarray:
+    """今の深度が、ロボットのいない「いつもの写真」の深度より margin [m] 以上近い画素（＝ロボットがいる所）。
+
+    片付けの対象物は高さ 10cm 以下なので、margin を 15cm にすれば物体は含まれない。
+    """
+    valid = np.isfinite(current_depth) & np.isfinite(reference_depth)
+    return valid & (current_depth < reference_depth - margin)
+
+
+def points_hidden_by_mask(mask: np.ndarray, points: Mapping[str, Sequence[float]], *, radius_px: float) -> set[str]:
+    """点（画像上の座標）から半径 radius_px 以内にロボットの領域がかかる点の名前。
+
+    画素 (i, j) は [j, j+1) × [i, i+1) の範囲として距離を測る。
+    """
+    h, w = mask.shape
+    hidden = set()
+    for key, (u, v) in points.items():
+        j0, j1 = max(int(math.floor(u - radius_px)), 0), min(int(math.ceil(u + radius_px)) + 1, w)
+        i0, i1 = max(int(math.floor(v - radius_px)), 0), min(int(math.ceil(v + radius_px)) + 1, h)
+        if j0 >= j1 or i0 >= i1:
+            continue
+        jj, ii = np.meshgrid(np.arange(j0, j1), np.arange(i0, i1))
+        dx = np.maximum(np.maximum(jj - u, 0), u - (jj + 1))
+        dy = np.maximum(np.maximum(ii - v, 0), v - (ii + 1))
+        if np.any(mask[i0:i1, j0:j1] & (dx * dx + dy * dy <= radius_px * radius_px)):
+            hidden.add(key)
+    return hidden
+
+
+def mask_overlaps_rect(mask: np.ndarray, rect: Rect) -> bool:
+    """画像上の長方形 [px] の中に、ロボットの領域が 1 画素でもあるか。"""
+    h, w = mask.shape
+    j0 = max(int(math.floor(rect.center[0] - rect.size[0] / 2)), 0)
+    j1 = min(int(math.ceil(rect.center[0] + rect.size[0] / 2)), w)
+    i0 = max(int(math.floor(rect.center[1] - rect.size[1] / 2)), 0)
+    i1 = min(int(math.ceil(rect.center[1] + rect.size[1] / 2)), h)
+    return j0 < j1 and i0 < i1 and bool(mask[i0:i1, j0:j1].any())
+
+
+def hidden_truth(depth_check: Mapping[str, Mapping[str, float]], *, tol: float = 0.05) -> set[str]:
+    """隠れている物体の正解：物体の上端の中心の画素で、測った深度が期待（カメラの高さ − 上端の高さ）より tol [m]
+    以上近い（＝物体の上に何かがある）。vlm_scene.py の depth_check を使う。"""
+    return {k for k, v in depth_check.items() if v["measured_m"] < v["expected_m"] - tol}
+
+
+def set_scores(*, predicted: set[str], actual: set[str]) -> dict:
+    """集合どうしの照合（隠れの判定の評価用）。"""
+    tp, fp, fn = len(predicted & actual), len(predicted - actual), len(actual - predicted)
+    return {
+        "tp": tp,
+        "fp": fp,
+        "fn": fn,
+        "precision": tp / (tp + fp) if tp + fp else None,
+        "recall": tp / (tp + fn) if tp + fn else None,
+    }
 
 
 # ------------------------------------------------------------
@@ -487,6 +681,18 @@ RESPONSE_SCHEMA: dict = {
 }
 
 
+RESPONSE_SCHEMA_HIDDEN: dict = {
+    **RESPONSE_SCHEMA,
+    "properties": {**RESPONSE_SCHEMA["properties"], "hidden_objects": {"type": "array", "items": {"type": "string"}}},
+    "required": ["moved_objects", "hidden_objects"],
+}
+
+HIDDEN_NOTE = (
+    "If something in the CURRENT image (e.g. a robot) covers the usual place of an object, so that you cannot tell "
+    "whether the object is still there, do NOT list that object in moved_objects. "
+    "Instead, put its name in hidden_objects."
+)
+
 ROBOT_NOTE = (
     "A mobile robot (a black wheeled base with a white robot arm) may appear in the CURRENT image. "
     "It is not a household object: never list it, even though it is absent from the REFERENCE image."
@@ -494,7 +700,13 @@ ROBOT_NOTE = (
 
 
 def build_prompt(
-    *, coord_format: str, width: int, height: int, object_names: Sequence[str] | None, robot_note: bool = False
+    *,
+    coord_format: str,
+    width: int,
+    height: int,
+    object_names: Sequence[str] | None,
+    robot_note: bool = False,
+    hidden_field: bool = False,
 ) -> str:
     """差分検出のプロンプト。画像は 1 枚目に「いつもの状態」、2 枚目に「今の状態」を渡す前提。"""
     if object_names:
@@ -503,6 +715,8 @@ def build_prompt(
     else:
         name_rule = "Use a short Japanese name for `name`, e.g. color + kind of object."
     robot = ROBOT_NOTE + "\n" if robot_note else ""
+    robot += HIDDEN_NOTE + "\n" if hidden_field else ""
+    hidden_example = ', "hidden_objects": ["..."]' if hidden_field else ""
     return f"""You are given two top-down images of the same room, taken by the same fixed ceiling camera.
 Image 1 is the REFERENCE: the usual, tidy state of the room.
 Image 2 is the CURRENT state. Some objects have been moved from their usual places.
@@ -522,7 +736,7 @@ For each moved object, report:
 
 Respond with JSON only, in this format:
 {{"moved_objects": [{{"name": "...", "current_location": "...", "current_point": [0, 0], \
-"target_location": "...", "target_point": [0, 0]}}]}}
+"target_location": "...", "target_point": [0, 0]}}]{hidden_example}}}
 """
 
 
@@ -549,6 +763,24 @@ def _point(value, label: str) -> tuple[float, float]:
     if not isinstance(value, list | tuple) or len(value) != 2 or not all(isinstance(v, int | float) for v in value):
         raise ValueError(f"{label} は 2 つの数値の配列である必要があります: {value!r}")
     return (float(value[0]), float(value[1]))
+
+
+def drop_static_predictions(preds: Sequence[PredictedMove], *, min_move_px: float = 15.0) -> list[PredictedMove]:
+    """今の位置と戻し先がほぼ同じ（min_move_px 未満）予測を除く。
+
+    #10：VLM が、動いていない物体を「動いた」と挙げ、今の位置と戻し先に同じ点を答えることがあった
+    （ロボットが写った画像での誤検出 11 件すべて）。動いた物体なら、この 2 点は離れているはず。
+    """
+    return [p for p in preds if math.dist(p.current_px, p.target_px) >= min_move_px]
+
+
+def parse_hidden(text: str) -> list[str]:
+    """応答の hidden_objects（隠れて見えない物体の名前）。項目がなければ空のリスト。"""
+    data = json.loads(_extract_json(text))
+    hidden = data.get("hidden_objects", []) if isinstance(data, dict) else []
+    if not isinstance(hidden, list) or not all(isinstance(h, str) for h in hidden):
+        raise ValueError(f"hidden_objects は文字列の配列である必要があります: {hidden!r}")
+    return hidden
 
 
 def parse_prediction(text: str, *, coord_format: str, width: int, height: int) -> list[PredictedMove]:
