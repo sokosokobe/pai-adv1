@@ -9,7 +9,6 @@ build/
 
 # 秘密情報
 .env
-.env.*
 
 # 実行結果
 outputs/

@@ -12,6 +12,10 @@ dependencies = [
     "nvidia-ml-py",
     "psutil",
     "pillow",
+    # VLM（Issue #5）。anthropic 1.x は httpx2（idna>=3.18 が必要）を使い、Isaac Sim の idna==3.10 と衝突するので 0.x に留める
+    "anthropic>=0.125,<1",
+    "google-genai>=2.29",
+    "python-dotenv",
 ]
 
 # src/restorebot を editable install する: .venv\Scripts\python.exe -m pip install -e .
