@@ -3,7 +3,7 @@
 写真1枚で「いつもの状態」を教えておくと、散らかった部屋や会議室を、移動しながら元の状態に戻してくれるロボットのデモです。
 Physical AI 応用講座の最終課題として、NVIDIA Isaac Sim 上で開発しています。
 
-> **ステータス**：M0（技術検証）中
+> **ステータス**：M0（技術検証）完了（2026-10-12）。結果は [docs/experiments/M0_summary.md](docs/experiments/M0_summary.md)、設計書は [docs/design.md](docs/design.md)（作成中）
 
 ---
 
@@ -68,8 +68,17 @@ Physical AI 応用講座の最終課題として、NVIDIA Isaac Sim 上で開発
 ```
 
 - **シミュレータ**：NVIDIA Isaac Sim 6.1
-- **ロボット**：RidgebackFranka（全方向移動台車＋7自由度アーム）
-- **AI**：VLM（推論のみ。具体的なモデルは M0 で選定）
+- **ロボット**：RidgebackFranka（全方向移動台車＋7自由度アーム。Isaac Sim の Multiphysics 版のアセット）
+- **AI**：VLM（推論のみ）。Claude Sonnet 5.5 を使う（代わりの候補：Gemini Robotics-ER 2）
+
+M0（技術検証）で決めた主な構成は次のとおりです（詳細は [M0 のまとめ](docs/experiments/M0_summary.md)）。
+
+| 層・機能 | 方法 |
+|---|---|
+| エージェント層 | 天井カメラ（高さ 2.6m、真下向き、RGB＋深度）の「いつもの写真」と現在の画像を VLM に渡し、動いた物体・今の位置・戻し先を JSON で受け取る |
+| 移動層 | 台車の速度指令（上限 0.5m/s・1.0rad/s）。物体が台車の正面 0.55〜0.85m に来る位置に止める |
+| 操作層 | cuMotion の RmpFlowController と、Isaac Sim 6.1 の Pick and Place サンプルの把持・配置の手順（PickPlaceController） |
+| 動画 | headless で撮影用のカメラの画像を連番で保存し、ffmpeg で mp4 にする |
 
 ---
 
@@ -79,7 +88,7 @@ Physical AI 応用講座の最終課題として、NVIDIA Isaac Sim 上で開発
 
 | マイルストーン | 内容 | 目安 |
 |---|---|---|
-| M0 技術検証 | ロボットの読み込み、台車の移動、アームの動作計画、把持、VLM による差分検出、動画記録の検証 | 〜10/11 |
+| M0 技術検証 | ロボットの読み込み、台車の移動、アームの動作計画、把持、VLM による差分検出、動画記録、起動時間の検証 | 〜10/11（10/12 完了） |
 | M1 停止状態でのタスク | 台車を止めたまま、VLM が差分を見つけて物を元に戻す（物体の位置はシミュレータの真値を使用） | 〜10/16 |
 | M2 移動を含むタスク | 部屋の中を移動しながら複数の物を元に戻す（真値を使用） | 〜10/21 |
 | M3 位置推定 | 真値を使わず、カメラ画像から物体やロボットの位置を推定する | 〜10/25 |
@@ -130,6 +139,15 @@ Isaac Sim の利用には、NVIDIA Omniverse License Agreement（EULA）への�
 $env:OMNI_KIT_ACCEPT_EULA = "YES"
 ```
 
+VLM の API キーは、リポジトリ直下の `.env` に書きます（書き方は `.env.example` を参照。`.env` はコミットしません）。
+
+```text
+ANTHROPIC_API_KEY=...
+GEMINI_API_KEY=...   # 代わりの候補（Gemini Robotics-ER 2）を使う場合
+```
+
+動画の作成には ffmpeg を使います（開発環境では `winget install --id Gyan.FFmpeg` で導入した FFmpeg 9.0.2 を使用）。
+
 ## 実行方法
 
 ```powershell
@@ -153,8 +171,9 @@ $env:OMNI_KIT_ACCEPT_EULA = "YES"
 ├── tests/          # テスト（tests/sim は Isaac Sim が必要）
 ├── scripts/        # 実行スクリプト
 ├── docs/           # 設計書・検証記録
+│   ├── design.md       # 設計書（作成中）
 │   ├── env_check.md
-│   └── experiments/
+│   └── experiments/    # 検証記録（M0_summary.md が M0 のまとめ）
 └── outputs/        # 実行結果（Git 管理外）
 ```
 
@@ -171,5 +190,7 @@ $env:OMNI_KIT_ACCEPT_EULA = "YES"
 
 - [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac/sim)
 - RidgebackFranka（Clearpath Robotics, BSD-3 License）：Isaac Sim のアセットサーバーから読み込んで使用しています
+- [Claude API](https://www.anthropic.com/api)（Anthropic）：VLM として使用しています
+- [FFmpeg](https://ffmpeg.org/)：動画の作成に使用しています
 
 NVIDIA のアセットは本リポジトリに含めていません。
