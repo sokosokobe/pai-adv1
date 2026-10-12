@@ -15,6 +15,9 @@
 - GPU：RTX 5070（12GB）、RAM 32GB。重いシーン、高解像度、多数のカメラは避ける
 - EULA：環境変数 `OMNI_KIT_ACCEPT_EULA=YES`
 - Isaac Sim の起動は、初回が約110秒、2回目以降が約8秒
+- Windows のスマート アプリ コントロールがオン（設定は変更しない）。署名のない実行ファイルや DLL は阻止されることがある
+  - 2026-10-12 には torch の DLL が一時的に阻止され、Isaac Sim の起動に毎回約3分かかった（ログに `WinError 4551` が出る）
+  - 再発したときの対処は `docs/experiments/8_startup_time.md` を参照
 
 ## コマンド
 
