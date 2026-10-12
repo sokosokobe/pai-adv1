@@ -87,6 +87,14 @@ class ObjectSpec:
     shape: str
     size: tuple[float, ...]
     color: tuple[float, float, float]  # RGB（0〜1）
+    mass: float = 0.1  # [kg]（#9 から使う。#5 の物体は描画だけなので既定値）
+
+    @property
+    def grasp_width(self) -> float:
+        """上から掴むときの指の間の幅（箱は短い辺、それ以外は直径）。"""
+        if self.shape == "cube":
+            return min(self.size[0], self.size[1])
+        return 2 * self.size[0]
 
     @property
     def height(self) -> float:
@@ -132,9 +140,12 @@ TIDY_LAYOUT: dict[str, Placement] = {
 }
 
 
-def object_center(spec: ObjectSpec, placement: Placement) -> tuple[float, float, float]:
-    """物体の中心のワールド座標（面の上に置いたとき）。"""
-    return (placement.x, placement.y, SURFACES[placement.surface].z + spec.height / 2)
+def object_center(
+    spec: ObjectSpec, placement: Placement, *, scene: SceneSpec | None = None
+) -> tuple[float, float, float]:
+    """物体の中心のワールド座標（面の上に置いたとき）。scene を省略すると #5 の部屋（ROOM_V1）。"""
+    surfaces = SURFACES if scene is None else scene.surfaces
+    return (placement.x, placement.y, surfaces[placement.surface].z + spec.height / 2)
 
 
 @dataclass(frozen=True)
@@ -156,6 +167,7 @@ def generate_scenarios(
     max_shift: float | None = None,
     same_surface: bool = False,
     max_tries: int = 1000,
+    scene: SceneSpec | None = None,
 ) -> list[Scenario]:
     """「いつもの状態」から 1〜3 個を別の場所へ動かした状態を n 個作る。シードを固定すれば毎回同じになる。
 
@@ -164,27 +176,31 @@ def generate_scenarios(
     """
     if same_surface and max_shift is None:
         raise ValueError("same_surface=True のときは max_shift を指定してください")
+    objects = OBJECTS if scene is None else scene.objects
+    tidy_layout = TIDY_LAYOUT if scene is None else scene.tidy
+    surfaces = SURFACES if scene is None else scene.surfaces
+    surface_weights = SURFACE_WEIGHTS if scene is None else scene.surface_weights
     rng = np.random.default_rng(seed)
-    specs = {o.key: o for o in OBJECTS}
-    keys = [o.key for o in OBJECTS]
-    surface_keys = list(SURFACE_WEIGHTS)
-    weights = np.array([SURFACE_WEIGHTS[k] for k in surface_keys])
+    specs = {o.key: o for o in objects}
+    keys = [o.key for o in objects]
+    surface_keys = list(surface_weights)
+    weights = np.array([surface_weights[k] for k in surface_keys])
     scenarios = []
     for index in range(n):
         k = int(rng.integers(min_moved, max_moved + 1))
         chosen = set(rng.choice(keys, size=k, replace=False).tolist())
         moved = tuple(key for key in keys if key in chosen)
-        placements = dict(TIDY_LAYOUT)
+        placements = dict(tidy_layout)
         for key in moved:
-            spec, tidy = specs[key], TIDY_LAYOUT[key]
+            spec, tidy = specs[key], tidy_layout[key]
             for _ in range(max_tries):
                 if same_surface:
-                    surface = SURFACES[tidy.surface]
+                    surface = surfaces[tidy.surface]
                     r = float(rng.uniform(min_shift, max_shift))
                     a = float(rng.uniform(-math.pi, math.pi))
                     x, y = tidy.x + r * math.cos(a), tidy.y + r * math.sin(a)
                 else:
-                    surface = SURFACES[surface_keys[int(rng.choice(len(surface_keys), p=weights / weights.sum()))]]
+                    surface = surfaces[surface_keys[int(rng.choice(len(surface_keys), p=weights / weights.sum()))]]
                     x = float(
                         rng.uniform(surface.center[0] - surface.size[0] / 2, surface.center[0] + surface.size[0] / 2)
                     )
@@ -265,6 +281,126 @@ CEILING_CAMERA = DownCamera(
 
 
 # ------------------------------------------------------------
+# 場面の定義（部屋・置き場所・物体・いつもの配置・天井カメラ）
+# ------------------------------------------------------------
+@dataclass(frozen=True)
+class SceneSpec:
+    key: str
+    room_half: tuple[float, float]  # 部屋の内側の半幅 (x, y) [m]
+    surfaces: dict[str, Surface] = field(hash=False)
+    surface_weights: dict[str, float] = field(hash=False)  # 動かす先の面を選ぶ確率
+    objects: tuple[ObjectSpec, ...] = ()
+    tidy: dict[str, Placement] = field(default_factory=dict, hash=False)
+    camera: DownCamera | None = None
+    marker: Rect | None = None  # 画像の向きを確かめる目印（床の左上の隅）
+
+
+# #5 の部屋（これまでの定数そのもの。#5 の結果を再現できるように残す）
+ROOM_V1 = SceneSpec(
+    key="room_v1",
+    room_half=ROOM_HALF,
+    surfaces=SURFACES,
+    surface_weights=SURFACE_WEIGHTS,
+    objects=OBJECTS,
+    tidy=TIDY_LAYOUT,
+    camera=CEILING_CAMERA,
+    marker=ORIENTATION_MARKER,
+)
+
+# #9 の自宅風の部屋：床 4.0 × 3.0m。置き場所は机（天板 0.70m）と低い棚（天板 0.45m）だけ（床には置かない）。
+# 物体は #4 で確認した把持の範囲（掴む幅 4〜5cm、高さ 10cm 以下、0.5kg 以下）に収める
+_HOME_HALF = (2.0, 1.5)
+_HOME_DESK = Surface(center=(0.8, 0.85), size=(1.2, 0.6), key="desk", label="机の上", z=0.70)
+_HOME_SIDE = Surface(center=(-1.5, -0.3), size=(0.4, 0.8), key="side_table", label="低い棚の上", z=0.45)
+HOME_V2 = SceneSpec(
+    key="home_v2",
+    room_half=_HOME_HALF,
+    surfaces={s.key: s for s in (_HOME_DESK, _HOME_SIDE)},
+    surface_weights={"desk": 0.5, "side_table": 0.5},
+    objects=(
+        ObjectSpec("cup", "赤いコップ", "cylinder", (0.025, 0.09), (0.85, 0.1, 0.1), mass=0.2),
+        ObjectSpec("pen_stand", "青いペン立て", "cylinder", (0.0225, 0.10), (0.1, 0.3, 0.9), mass=0.15),
+        ObjectSpec("spray", "緑のスプレー缶", "cylinder", (0.02, 0.10), (0.1, 0.65, 0.2), mass=0.3),
+        # リモコンは高さ 2.5cm では指先が机に当たって掴めなかった（0/3）。4cm で 3/3 成功したので 4cm にする
+        ObjectSpec("remote", "黒いリモコン", "cube", (0.15, 0.045, 0.04), (0.05, 0.05, 0.05), mass=0.15),
+        ObjectSpec("small_box", "黄色い小箱", "cube", (0.06, 0.04, 0.05), (0.95, 0.8, 0.1), mass=0.1),
+    ),
+    tidy={
+        "cup": Placement("desk", 0.40, 0.95),
+        "pen_stand": Placement("desk", 0.70, 1.00),
+        "remote": Placement("desk", 1.05, 0.80),
+        "spray": Placement("side_table", -1.5, -0.10),
+        "small_box": Placement("side_table", -1.5, -0.50),
+    },
+    # 部屋全体が写るよう、#5 より画角を広げ（水平 82°）、物体が小さく写る分だけ解像度を上げる
+    camera=DownCamera(position=(0.0, 0.0, 2.6), width=1280, height=960, focal_length=12.0, horizontal_aperture=20.955),
+    marker=Rect(center=(-1.8, 1.3), size=(0.15, 0.15)),
+)
+SCENES = {s.key: s for s in (ROOM_V1, HOME_V2)}
+
+
+# ------------------------------------------------------------
+# ロボット（今の画像にだけ写す。いつもの写真を撮るときはロボットは部屋にいない想定）
+# ------------------------------------------------------------
+ROBOT_HALF_SIZE = (0.47, 0.40)  # 台車の前後・左右の半分の長さ [m]（前後は #2 の実測 0.466m、左右は推定）
+ROBOT_GAP = 0.10  # 台車の前面と家具の隙間 [m]（#3：机は台車の前面から 10cm 程度に寄せる）
+
+
+def robot_rect(pose: Sequence[float]) -> Rect:
+    """台車を上から見たときの外接長方形（軸に平行）。"""
+    c, s = abs(math.cos(pose[2])), abs(math.sin(pose[2]))
+    hx, hy = ROBOT_HALF_SIZE
+    return Rect(center=(pose[0], pose[1]), size=(2 * (hx * c + hy * s), 2 * (hx * s + hy * c)))
+
+
+def rects_overlap(a: Rect, b: Rect) -> bool:
+    return (
+        abs(a.center[0] - b.center[0]) < (a.size[0] + b.size[0]) / 2
+        and abs(a.center[1] - b.center[1]) < (a.size[1] + b.size[1]) / 2
+    )
+
+
+def robot_faces(pose: Sequence[float], furniture: Rect) -> bool:
+    """台車の前方（前面の少し先）が家具の上にあるか（＝家具の正面で、家具の方を向いているか）。"""
+    d = ROBOT_HALF_SIZE[0] + ROBOT_GAP + 0.05
+    x, y = pose[0] + d * math.cos(pose[2]), pose[1] + d * math.sin(pose[2])
+    hx, hy = furniture.size[0] / 2, furniture.size[1] / 2
+    return abs(x - furniture.center[0]) <= hx and abs(y - furniture.center[1]) <= hy
+
+
+def sample_robot_poses(
+    n: int, *, seed: int, scene: SceneSpec, max_tries: int = 1000
+) -> list[tuple[float, float, float]]:
+    """家具のどれかの正面に、家具の方を向いて止まった台車の姿勢 (x, y, yaw) を n 個作る（作業中の想定）。"""
+    rng = np.random.default_rng(seed)
+    furniture = list(scene.surfaces.values())
+    hx_room, hy_room = scene.room_half
+    d = ROBOT_HALF_SIZE[0] + ROBOT_GAP
+    poses = []
+    for _ in range(n):
+        for _ in range(max_tries):
+            f = furniture[int(rng.integers(len(furniture)))]
+            side = int(rng.integers(4))  # 0: 家具の -x 側、1: +x 側、2: -y 側、3: +y 側
+            fx, fy, fw, fh = f.center[0], f.center[1], f.size[0], f.size[1]
+            if side in (0, 1):
+                sign = -1 if side == 0 else 1
+                x, y = fx + sign * (fw / 2 + d), fy + float(rng.uniform(-fh / 2, fh / 2))
+                yaw = 0.0 if side == 0 else math.pi
+            else:
+                sign = -1 if side == 2 else 1
+                x, y = fx + float(rng.uniform(-fw / 2, fw / 2)), fy + sign * (fh / 2 + d)
+                yaw = math.pi / 2 if side == 2 else -math.pi / 2
+            r = robot_rect((x, y, yaw))
+            inside = abs(x) + r.size[0] / 2 <= hx_room and abs(y) + r.size[1] / 2 <= hy_room
+            if inside and not any(rects_overlap(r, Rect(g.center, g.size)) for g in furniture):
+                poses.append((x, y, yaw))
+                break
+        else:
+            raise RuntimeError("ロボットの置き場所が見つかりませんでした")
+    return poses
+
+
+# ------------------------------------------------------------
 # 正解データ
 # ------------------------------------------------------------
 @dataclass(frozen=True)
@@ -275,13 +411,15 @@ class ScenarioTruth:
     target_px: dict[str, tuple[float, float]]  # 動いた物体の戻し先（いつもの画像での中心）
 
 
-def scenario_truth(scenario: Scenario, camera: DownCamera) -> ScenarioTruth:
-    specs = {o.key: o for o in OBJECTS}
+def scenario_truth(scenario: Scenario, camera: DownCamera, *, scene: SceneSpec | None = None) -> ScenarioTruth:
+    objects = OBJECTS if scene is None else scene.objects
+    tidy = TIDY_LAYOUT if scene is None else scene.tidy
+    specs = {o.key: o for o in objects}
     return ScenarioTruth(
         moved=scenario.moved,
-        names={o.key: o.name for o in OBJECTS},
-        current_px={k: camera.project(object_center(specs[k], p)) for k, p in scenario.placements.items()},
-        target_px={k: camera.project(object_center(specs[k], TIDY_LAYOUT[k])) for k in scenario.moved},
+        names={o.key: o.name for o in objects},
+        current_px={k: camera.project(object_center(specs[k], p, scene=scene)) for k, p in scenario.placements.items()},
+        target_px={k: camera.project(object_center(specs[k], tidy[k], scene=scene)) for k in scenario.moved},
     )
 
 
@@ -349,20 +487,29 @@ RESPONSE_SCHEMA: dict = {
 }
 
 
-def build_prompt(*, coord_format: str, width: int, height: int, object_names: Sequence[str] | None) -> str:
+ROBOT_NOTE = (
+    "A mobile robot (a black wheeled base with a white robot arm) may appear in the CURRENT image. "
+    "It is not a household object: never list it, even though it is absent from the REFERENCE image."
+)
+
+
+def build_prompt(
+    *, coord_format: str, width: int, height: int, object_names: Sequence[str] | None, robot_note: bool = False
+) -> str:
     """差分検出のプロンプト。画像は 1 枚目に「いつもの状態」、2 枚目に「今の状態」を渡す前提。"""
     if object_names:
         names = "\n".join(f"- {n}" for n in object_names)
         name_rule = "The room contains these movable objects. Use exactly one of these names for `name`:\n" + names
     else:
         name_rule = "Use a short Japanese name for `name`, e.g. color + kind of object."
+    robot = ROBOT_NOTE + "\n" if robot_note else ""
     return f"""You are given two top-down images of the same room, taken by the same fixed ceiling camera.
 Image 1 is the REFERENCE: the usual, tidy state of the room.
 Image 2 is the CURRENT state. Some objects have been moved from their usual places.
 
 Task: list every object whose position in the CURRENT image differs from its position in the REFERENCE image.
 Do not list objects that stayed in place. Furniture (desk, shelf) and walls never move.
-
+{robot}
 {name_rule}
 
 For each moved object, report:

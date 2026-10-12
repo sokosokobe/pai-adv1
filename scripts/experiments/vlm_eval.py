@@ -32,7 +32,7 @@ from PIL import Image  # noqa: E402
 
 from experiments.vlm_clients import make_client  # noqa: E402
 from experiments.vlm_common import (  # noqa: E402
-    OBJECTS,
+    SCENES,
     ScenarioTruth,
     aggregate,
     build_prompt,
@@ -49,7 +49,8 @@ def load_dataset(dataset: Path) -> tuple[dict, list[tuple[dict, ScenarioTruth]]]
     record = json.loads((dataset / "truth.json").read_text(encoding="utf-8"))
     if record.get("status") != "ok":
         raise RuntimeError(f"データセットが不完全です: {record.get('error')}")
-    names = {o.key: o.name for o in OBJECTS}
+    objects = SCENES[record.get("scene", "room_v1")].objects  # #5 のデータセットには scene の記録がない
+    names = {o.key: o.name for o in objects}
     items = []
     for s in record["scenarios"]:
         truth = ScenarioTruth(
@@ -70,9 +71,17 @@ def main() -> int:
     parser.add_argument("--modes", nargs="+", choices=list(MODES), default=list(MODES))
     parser.add_argument("--dataset", type=Path, default=REPO_ROOT / "outputs" / "m0_5" / "dataset")
     parser.add_argument("--run", default="main", help="出力のフォルダ名")
+    parser.add_argument(
+        "--eval-root", type=Path, default=REPO_ROOT / "outputs" / "m0_5" / "eval", help="出力の親フォルダ"
+    )
     parser.add_argument("--limit", type=int, default=None, help="使うシナリオの数（動作確認用）")
     parser.add_argument("--match-tol-px", type=float, default=40.0)
     parser.add_argument("--target-tol-px", type=float, default=40.0)
+    parser.add_argument(
+        "--robot-note",
+        action="store_true",
+        help="プロンプトに「ロボットが写ることがあるが片付けの対象ではない」を加える",
+    )
     args = parser.parse_args()
 
     record, items = load_dataset(args.dataset)
@@ -80,7 +89,7 @@ def main() -> int:
     cam = record["camera"]
     width, height = cam["width"], cam["height"]
     before_png = (args.dataset / "tidy_rgb.png").read_bytes()
-    out_dir = REPO_ROOT / "outputs" / "m0_5" / "eval" / args.run
+    out_dir = args.eval_root / args.run
     (out_dir / "overlay").mkdir(parents=True, exist_ok=True)
     results_path = out_dir / "results.jsonl"
     done = set()
@@ -92,8 +101,15 @@ def main() -> int:
     for model_key in args.models:
         client = make_client(model_key)
         for mode in args.modes:
-            names = [o.name for o in OBJECTS] if MODES[mode] else None
-            prompt = build_prompt(coord_format=client.coord_format, width=width, height=height, object_names=names)
+            objects = SCENES[record.get("scene", "room_v1")].objects
+            names = [o.name for o in objects] if MODES[mode] else None
+            prompt = build_prompt(
+                coord_format=client.coord_format,
+                width=width,
+                height=height,
+                object_names=names,
+                robot_note=args.robot_note,
+            )
             (out_dir / f"prompt_{client.coord_format}_{mode}.txt").write_text(prompt, encoding="utf-8")
             for s, truth in items:
                 if (model_key, mode, s["index"]) in done:

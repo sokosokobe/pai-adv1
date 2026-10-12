@@ -7,13 +7,17 @@ import pytest
 
 from experiments.vlm_common import (
     CEILING_CAMERA,
+    HOME_V2,
     OBJECTS,
+    ROBOT_NOTE,
     ROOM_HALF,
+    ROOM_V1,
     SURFACES,
     TIDY_LAYOUT,
     DownCamera,
     DummyVlmClient,
     PredictedMove,
+    Rect,
     aggregate,
     build_prompt,
     cost_usd,
@@ -22,6 +26,10 @@ from experiments.vlm_common import (
     generate_scenarios,
     object_center,
     parse_prediction,
+    rects_overlap,
+    robot_faces,
+    robot_rect,
+    sample_robot_poses,
     scenario_truth,
     to_pixels,
 )
@@ -370,3 +378,93 @@ def test_dummy_client_returns_canned_text():
     result = client.detect(b"before", b"after", "prompt")
     assert result.text == _response([]) and result.latency_s >= 0.0
     assert client.calls == [("prompt", 2)]
+
+
+# ---- 場面の定義（#9：自宅風の部屋と、掴める物体の組）----
+
+
+def test_room_v1_scene_matches_module_constants():
+    # #5 の場面は、これまでの定数と同じ内容（#5 の結果を再現できる）
+    assert ROOM_V1.objects == OBJECTS
+    assert ROOM_V1.tidy == TIDY_LAYOUT
+    assert ROOM_V1.surfaces == SURFACES
+    assert ROOM_V1.camera == CEILING_CAMERA
+    assert generate_scenarios(10, seed=0) == generate_scenarios(10, seed=0, scene=ROOM_V1)
+
+
+def test_home_v2_objects_fit_grasp_range_of_issue4():
+    # #4 で確認した把持の範囲：掴む幅 4〜5cm、高さ 10cm 以下、0.5kg 以下
+    assert len(HOME_V2.objects) == 5
+    for o in HOME_V2.objects:
+        assert 0.04 <= o.grasp_width <= 0.05, o.key
+        assert o.height <= 0.10, o.key
+        assert 0 < o.mass <= 0.5, o.key
+    assert len({o.color for o in HOME_V2.objects}) == 5  # 色がすべて違う
+
+
+def test_home_v2_surfaces_are_within_reach_height_and_not_floor():
+    # #3 の楽に届く範囲：手先の高さ 0.4〜0.9m（物体の中心の高さで判定）
+    assert "floor" not in HOME_V2.surfaces
+    for o in HOME_V2.objects:
+        for s in HOME_V2.surfaces.values():
+            assert 0.4 <= s.z + o.height / 2 <= 0.9, (o.key, s.key)
+
+
+def test_home_v2_tidy_layout_and_scenarios_are_valid_and_visible():
+    scene = HOME_V2
+    specs = {o.key: o for o in scene.objects}
+    assert set(scene.tidy) == set(specs)
+    for sc in generate_scenarios(50, seed=8, min_shift=0.3, scene=scene):
+        assert 1 <= len(sc.moved) <= 3
+        for key, p in sc.placements.items():
+            assert p.surface in scene.surfaces
+            assert scene.surfaces[p.surface].contains((p.x, p.y), specs[key].footprint_radius)
+            u, v = scene.camera.project(object_center(specs[key], p, scene=scene))
+            assert 0 <= u <= scene.camera.width and 0 <= v <= scene.camera.height
+
+
+def test_home_v2_scenario_truth_uses_scene_objects():
+    sc = generate_scenarios(1, seed=0, min_shift=0.3, scene=HOME_V2)[0]
+    truth = scenario_truth(sc, HOME_V2.camera, scene=HOME_V2)
+    assert set(truth.names) == {o.key for o in HOME_V2.objects}
+    assert set(truth.target_px) == set(sc.moved)
+
+
+# ---- ロボットの置き方（今の画像にだけ写す。#9 のリスク #3 の確認）----
+
+
+def test_robot_poses_face_furniture_and_stay_in_room_without_overlap():
+    scene = HOME_V2
+    furniture = [Rect(s.center, s.size) for s in scene.surfaces.values()]
+    poses = sample_robot_poses(30, seed=0, scene=scene)
+    assert poses == sample_robot_poses(30, seed=0, scene=scene)
+    for pose in poses:
+        r = robot_rect(pose)
+        hx, hy = scene.room_half
+        assert abs(r.center[0]) + r.size[0] / 2 <= hx and abs(r.center[1]) + r.size[1] / 2 <= hy
+        for f in furniture:
+            assert not rects_overlap(r, f)
+        # どれかの家具の正面にいて、家具の方を向いている
+        assert any(robot_faces(pose, f) for f in furniture)
+
+
+def test_robot_rect_rotates_with_yaw():
+    r0 = robot_rect((0.0, 0.0, 0.0))
+    r90 = robot_rect((0.0, 0.0, math.pi / 2))
+    assert r0.size == pytest.approx((r90.size[1], r90.size[0]))
+    assert r0.size[0] > r0.size[1]  # 台車は前後に長い
+
+
+def test_rects_overlap():
+    a = Rect(center=(0.0, 0.0), size=(1.0, 1.0))
+    assert rects_overlap(a, Rect(center=(0.9, 0.0), size=(1.0, 1.0)))
+    assert not rects_overlap(a, Rect(center=(1.1, 0.0), size=(1.0, 1.0)))
+
+
+def test_prompt_robot_note_is_optional_and_does_not_change_default():
+    kwargs = {"coord_format": "pixel_xy", "width": 1280, "height": 960, "object_names": None}
+    default = build_prompt(**kwargs)
+    with_note = build_prompt(**kwargs, robot_note=True)
+    assert "robot" not in default.lower()
+    assert "robot" in with_note.lower()
+    assert with_note.replace(ROBOT_NOTE + "\n", "") == default

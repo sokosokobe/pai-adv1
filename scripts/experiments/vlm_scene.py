@@ -34,16 +34,12 @@ sys.path.insert(0, str(REPO_ROOT / "scripts"))  # experiments.* を import す�
 
 from experiments.arm_common import quat_from_yaw_wxyz  # noqa: E402
 from experiments.vlm_common import (  # noqa: E402
-    CEILING_CAMERA,
-    OBJECTS,
-    ORIENTATION_MARKER,
-    ROOM_HALF,
-    SURFACES,
-    TIDY_LAYOUT,
+    SCENES,
     Placement,
     draw_overlay,
     generate_scenarios,
     object_center,
+    sample_robot_poses,
     scenario_truth,
 )
 
@@ -51,7 +47,20 @@ from experiments.vlm_common import (  # noqa: E402
 DIFFICULTIES = {
     "easy": {"min_shift": 0.4},
     "small": {"min_shift": 0.10, "max_shift": 0.25, "same_surface": True},
+    "home": {"min_shift": 0.3},  # #9 の部屋用：置き場所（机・低い棚）を選び直して 30cm 以上離す
 }
+FURNITURE_COLORS = {"desk": [0.55, 0.36, 0.2], "shelf": [0.35, 0.25, 0.18], "side_table": [0.35, 0.25, 0.18]}
+# #3 の台車用の待機姿勢（台車座標で (0.4, 0, 0.95) に手先を真下に向けた姿勢）。作業中のロボットとして写す
+STANDBY_ARM = {
+    "panda_joint1": -1.261,
+    "panda_joint2": -1.378,
+    "panda_joint3": 0.182,
+    "panda_joint4": -2.254,
+    "panda_joint5": 0.229,
+    "panda_joint6": 0.892,
+    "panda_joint7": 0.228,
+}
+ROBOT_PARKED = (6.0, 0.0, 0.0)  # ロボットを写さないときの置き場所（部屋の外。天井カメラに写らない）
 WALL_HEIGHT = 2.4
 WALL_THICKNESS = 0.05
 # 物体を動かした後、描画が落ち着くまで進めるフレーム数。RTX の時間方向の処理で前のシーンの物体の残像が残る。
@@ -65,11 +74,21 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=Path, default=REPO_ROOT / "outputs" / "m0_5" / "dataset")
     parser.add_argument("--difficulty", choices=list(DIFFICULTIES), default="easy")
+    parser.add_argument("--scene", choices=list(SCENES), default="room_v1")
+    parser.add_argument(
+        "--robot",
+        action="store_true",
+        help="RidgebackFranka を置き、ロボットが写った散らかった画像も <out>_robot/ に作る（いつもの画像には写さない）",
+    )
     parser.add_argument("--gui", action="store_true", help="GUI を表示する（既定は headless）")
     args = parser.parse_args()
     out_dir: Path = args.out
-    (out_dir / "overlay").mkdir(parents=True, exist_ok=True)
-    (out_dir / "depth_preview").mkdir(parents=True, exist_ok=True)
+    robot_dir = out_dir.with_name(out_dir.name + "_robot")
+    for d in (out_dir, robot_dir) if args.robot else (out_dir,):
+        (d / "overlay").mkdir(parents=True, exist_ok=True)
+        (d / "depth_preview").mkdir(parents=True, exist_ok=True)
+    scene = SCENES[args.scene]
+    OBJECTS, SURFACES, TIDY_LAYOUT = scene.objects, scene.surfaces, scene.tidy  # noqa: N806
     os.environ.setdefault("OMNI_KIT_ACCEPT_EULA", "YES")
 
     # ------------------------------------------------------------
@@ -80,15 +99,20 @@ def main() -> int:
     simulation_app = SimulationApp({"headless": not args.gui})
     exit_code = 1
     record: dict = {}
+    robot_record: dict = {}
     try:
         import isaacsim.core.experimental.utils.app as app_utils
         import numpy as np
-        from isaacsim.core.experimental.objects import Cone, Cube, Cylinder, DomeLight, Sphere
+        from isaacsim.core.experimental.objects import Cone, Cube, Cylinder, DomeLight, GroundPlane, Sphere
         from isaacsim.sensors.experimental.rtx import CameraSensor, RtxCamera
         from PIL import Image
 
-        cam = CEILING_CAMERA
-        hx, hy = ROOM_HALF
+        cam = scene.camera
+        hx, hy = scene.room_half
+        # ロボットを置くときは、ロボットが乗る地面（衝突あり）を置き、見た目の床の板は地面と重ならないよう 2mm 上げる
+        floor_top = 0.002 if args.robot else 0.0
+        if args.robot:
+            GroundPlane("/World/ground_plane")
 
         # ---- 部屋：床・壁・机・棚・向きの目印 ----
         # 真下からの平行光源は床に光源の映り込み（白飛び）を作ったので、ドームライトだけにする
@@ -97,7 +121,7 @@ def main() -> int:
             "/World/room/floor",
             sizes=1.0,
             scales=[[2 * hx, 2 * hy, 0.02]],
-            positions=[[0, 0, -0.01]],
+            positions=[[0, 0, floor_top - 0.01]],
             colors=[[0.45, 0.45, 0.48]],
         )
         t = WALL_THICKNESS
@@ -109,9 +133,8 @@ def main() -> int:
         }
         for name, (pos, size) in walls.items():
             Cube(f"/World/room/wall_{name}", sizes=1.0, scales=[size], positions=[pos], colors=[[0.92, 0.9, 0.85]])
-        furniture_colors = {"desk": [0.55, 0.36, 0.2], "shelf": [0.35, 0.25, 0.18]}
-        for key, color in furniture_colors.items():
-            s = SURFACES[key]
+        for key, s in SURFACES.items():
+            color = FURNITURE_COLORS[key]
             Cube(
                 f"/World/room/{key}",
                 sizes=1.0,
@@ -119,12 +142,12 @@ def main() -> int:
                 positions=[[s.center[0], s.center[1], s.z / 2]],
                 colors=[color],
             )
-        m = ORIENTATION_MARKER
+        m = scene.marker
         Cube(
             "/World/room/orientation_marker",
             sizes=1.0,
             scales=[[m.size[0], m.size[1], 0.005]],
-            positions=[[m.center[0], m.center[1], 0.0025]],
+            positions=[[m.center[0], m.center[1], floor_top + 0.0025]],
             colors=[[0.05, 0.05, 0.05]],
         )
 
@@ -147,7 +170,8 @@ def main() -> int:
             for o in OBJECTS:
                 p = placements[o.key]
                 shapes[o.key].set_world_poses(
-                    positions=[list(object_center(o, p))], orientations=[list(quat_from_yaw_wxyz(p.yaw))]
+                    positions=[list(object_center(o, p, scene=scene))],
+                    orientations=[list(quat_from_yaw_wxyz(p.yaw))],
                 )
 
         # ---- 天井カメラ（真下向き：カメラの -Z が視線、+Y が画像の上。回転なしでワールドの -Z を向く）----
@@ -160,11 +184,34 @@ def main() -> int:
         focal = float(rtx.camera.get_focal_lengths().numpy()[0][0])
         h_ap, v_ap = (float(a.numpy()[0][0]) for a in rtx.camera.get_apertures())
 
+        robot = None
+        if args.robot:
+            from isaacsim.core.simulation_manager import SimulationManager
+
+            from experiments import ridgeback_sim as rs
+
+            rs.stage_utils.add_reference_to_stage(rs.asset_url("multiphysics"), rs.ROBOT_PATH)
+            rs.wait_for_loading(simulation_app)
+            SimulationManager.setup_simulation(dt=1.0 / 60.0)
         app_utils.play()
         for _ in range(WARMUP_FRAMES):
             simulation_app.update()
+        if args.robot:
+            robot = rs.articulation()
+            names = list(robot.dof_names)
+            base_idx = [names.index(n) for n in rs.BASE_JOINTS]
 
-        def capture(stem: str) -> tuple[np.ndarray, np.ndarray]:
+        def place_robot(pose) -> None:
+            """台車を pose (x, y, yaw) に置き、アームを待機姿勢にして保持する（関節の位置を直接与える）。"""
+            q = robot.get_dof_positions().numpy()[0].copy()
+            q[base_idx] = pose
+            for name, value in STANDBY_ARM.items():
+                q[names.index(name)] = value
+            robot.set_dof_positions(q)
+            robot.set_dof_velocities(np.zeros_like(q))
+            robot.set_dof_position_targets(q)
+
+        def capture(stem: str, out_dir: Path = out_dir) -> tuple[np.ndarray, np.ndarray]:
             for _ in range(WARMUP_FRAMES):
                 simulation_app.update()
             for _ in range(120):
@@ -194,7 +241,7 @@ def main() -> int:
             """
             out = {}
             for o in OBJECTS:
-                x, y, z = object_center(o, placements[o.key])
+                x, y, z = object_center(o, placements[o.key], scene=scene)
                 top = (x, y, z + o.height / 2)
                 u, v = cam.project(top)
                 measured = float(depth_np[int(round(v)), int(round(u))])
@@ -202,10 +249,19 @@ def main() -> int:
                 out[o.key] = {"pixel": [u, v], "measured_m": measured, "expected_m": expected}
             return out
 
-        # ---- いつもの状態 ----
+        # ---- いつもの状態（ロボットは写さない）----
+        if robot is not None:
+            place_robot(ROBOT_PARKED)
         place_all(TIDY_LAYOUT)
         _, tidy_depth = capture("tidy")
+        if args.robot:
+            import shutil
+
+            for name in ("tidy_rgb.png", "tidy_depth.npy"):
+                shutil.copy(out_dir / name, robot_dir / name)
+            shutil.copy(out_dir / "depth_preview" / "tidy.png", robot_dir / "depth_preview" / "tidy.png")
         record = {
+            "scene": scene.key,
             "seed": args.seed,
             "difficulty": args.difficulty,
             "warmup_frames": WARMUP_FRAMES,
@@ -223,12 +279,18 @@ def main() -> int:
             "scenarios": [],
         }
 
-        # ---- 散らかった状態 ----
-        for sc in generate_scenarios(args.pairs, seed=args.seed, **DIFFICULTIES[args.difficulty]):
+        # ---- 散らかった状態（--robot のときは、ロボットが写った画像も作る）----
+        robot_poses = sample_robot_poses(args.pairs, seed=args.seed, scene=scene) if args.robot else []
+        if args.robot:
+            robot_record = {**record, "scenarios": []}
+        scenarios = generate_scenarios(args.pairs, seed=args.seed, scene=scene, **DIFFICULTIES[args.difficulty])
+        for sc in scenarios:
             stem = f"scene_{sc.index:02d}"
             place_all(sc.placements)
+            if robot is not None:
+                place_robot(ROBOT_PARKED)
             rgb_np, depth_np = capture(stem)
-            truth = scenario_truth(sc, cam)
+            truth = scenario_truth(sc, cam, scene=scene)
             draw_overlay(Image.fromarray(rgb_np), truth).save(out_dir / "overlay" / f"{stem}.png")
             record["scenarios"].append(
                 {
@@ -241,6 +303,18 @@ def main() -> int:
                     "depth_check": depth_checks(sc.placements, depth_np),
                 }
             )
+            if robot is not None:
+                pose = robot_poses[sc.index]
+                place_robot(pose)
+                rgb_r, depth_r = capture(stem, robot_dir)
+                draw_overlay(Image.fromarray(rgb_r), truth).save(robot_dir / "overlay" / f"{stem}.png")
+                robot_record["scenarios"].append(
+                    {
+                        **record["scenarios"][-1],
+                        "robot_pose": list(pose),
+                        "depth_check": depth_checks(sc.placements, depth_r),
+                    }
+                )
             print(f"[vlm_scene] {stem}: moved={list(sc.moved)}", flush=True)
         errs = [
             abs(c["measured_m"] - c["expected_m"])
@@ -249,6 +323,8 @@ def main() -> int:
         ]
         record["depth_check_max_abs_err_m"] = max(errs)
         record["status"] = "ok"
+        if args.robot:
+            robot_record["status"] = "ok"
         exit_code = 0
     except Exception as exc:
         traceback.print_exc()
@@ -258,6 +334,10 @@ def main() -> int:
         (out_dir / "truth.json").write_text(
             json.dumps(record, indent=2, ensure_ascii=False, default=float), encoding="utf-8"
         )
+        if args.robot:
+            (robot_dir / "truth.json").write_text(
+                json.dumps(robot_record, indent=2, ensure_ascii=False, default=float), encoding="utf-8"
+            )
         print(
             f"[vlm_scene] status={record.get('status')} "
             f"depth_err_max={record.get('depth_check_max_abs_err_m')} -> {out_dir}",

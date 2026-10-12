@@ -9,6 +9,8 @@
     .venv\\Scripts\\python.exe scripts\\experiments\\grasp_place.py                       # 3 種類 × 10 回
     .venv\\Scripts\\python.exe scripts\\experiments\\grasp_place.py --objects box --trials 5 --variant low_friction
     .venv\\Scripts\\python.exe scripts\\experiments\\grasp_place.py --objects box --trials 5 --variant heavy
+    .venv\\Scripts\\python.exe scripts\\experiments\\grasp_place.py --object-set home --trials 3 \\
+        --finger-drive franka_strong                                         # #9 の物体の組（1 行で入力する）
 
 出力:
     outputs/m0_4/<variant>_<finger-drive>/summary.json
@@ -78,13 +80,35 @@ FRAME_EVERY_STEPS = 15  # 連番画像：4Hz
 SETTLE_AFTER_S = 1.0
 
 
+def home_objects() -> dict[str, dict]:
+    """#9 の片付けの対象物（vlm_common.HOME_V2）を、このスクリプトの物体の形式にする。質量は物体ごとの値を使う。"""
+    from experiments.vlm_common import HOME_V2
+
+    out = {}
+    for o in HOME_V2.objects:
+        if o.shape == "cube":
+            out[o.key] = {"shape": "cube", "size": tuple(o.size), "mass": o.mass}
+        else:
+            out[o.key] = {"shape": "cylinder", "radius": o.size[0], "height": o.size[1], "mass": o.mass}
+    return out
+
+
+def remote_height_objects() -> dict[str, dict]:
+    """#9：平たい物体（リモコン）を上から掴める高さを調べる。高さ 2.5cm は指先が机に当たって掴めなかった。"""
+    return {f"remote_h{int(h * 1000)}": {"shape": "cube", "size": (0.15, 0.045, h), "mass": 0.15} for h in (0.04, 0.05)}
+
+
+OBJECT_SETS = {"issue4": lambda: OBJECTS, "home": home_objects, "remote_heights": remote_height_objects}
+
+
 def object_height(spec: dict) -> float:
     return spec["size"][2] if spec["shape"] == "cube" else spec["height"]
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--objects", nargs="+", choices=list(OBJECTS), default=list(OBJECTS))
+    parser.add_argument("--object-set", choices=list(OBJECT_SETS), default="issue4")
+    parser.add_argument("--objects", nargs="+", default=None, help="試す物体（既定は物体の組のすべて）")
     parser.add_argument("--trials", type=int, default=10)
     parser.add_argument("--variant", choices=list(VARIANTS), default="base")
     parser.add_argument("--seed", type=int, default=0)
@@ -96,7 +120,14 @@ def main() -> int:
     )
     parser.add_argument("--frames-trials", type=int, nargs="*", default=[0], help="連番画像を保存する試行の番号")
     args = parser.parse_args()
+    objects = OBJECT_SETS[args.object_set]()
+    args.objects = args.objects or list(objects)
+    unknown = set(args.objects) - set(objects)
+    if unknown:
+        parser.error(f"物体の組 {args.object_set} にない物体です: {sorted(unknown)}")
     run_name = f"{args.variant}_{args.finger_drive}"
+    if args.object_set != "issue4":
+        run_name = f"{args.object_set}_{run_name}"
     out_dir = REPO_ROOT / "outputs" / "m0_4" / run_name
     frames_root = REPO_ROOT / "outputs" / "m0_4" / "frames"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -110,6 +141,8 @@ def main() -> int:
     simulation_app = SimulationApp({"headless": True})
     variant = VARIANTS[args.variant]
     summary: dict = {
+        "object_set": args.object_set,
+        "objects": {k: objects[k] for k in args.objects},
         "variant": args.variant,
         "variant_params": variant,
         "seed": args.seed,
@@ -159,7 +192,7 @@ def main() -> int:
             restitutions=0.0,
         )
         bodies: dict[str, RigidPrim] = {}
-        for i, (name, spec) in enumerate(OBJECTS.items()):
+        for i, (name, spec) in enumerate(objects.items()):
             path = f"/World/obj_{name}"
             park = world_from_base(BASE_A, (PARK_IN_A[0], PARK_IN_A[1] + 0.3 * i, object_height(spec) / 2))
             if spec["shape"] == "cube":
@@ -171,7 +204,7 @@ def main() -> int:
             geom = GeomPrim(shape.paths, apply_collision_apis=True)
             geom.apply_physics_materials(material)
             body = RigidPrim(shape.paths)
-            body.set_masses([variant["mass"]])
+            body.set_masses([spec.get("mass", variant["mass"])])  # 物体の組が質量を持つ場合はそれを使う
             bodies[name] = body
         pick_nominal = world_from_base(BASE_A, (*PICK_IN_A, 0.0))
         place_xy = world_from_base(BASE_A, (*PLACE_IN_A, 0.0))[:2]
@@ -273,7 +306,7 @@ def main() -> int:
             )
 
         def run_trial(obj_name: str, trial: int, offset: tuple[float, float, float]) -> dict:
-            spec = OBJECTS[obj_name]
+            spec = objects[obj_name]
             body = bodies[obj_name]
             h = object_height(spec)
             reset_arm()
@@ -362,8 +395,8 @@ def main() -> int:
             for trial, offset in enumerate(offsets):
                 summary["trials"].append(run_trial(obj_name, trial, offset))
             # 次の物体の邪魔にならないよう、待機場所へ戻す
-            i = list(OBJECTS).index(obj_name)
-            park = world_from_base(BASE_A, (PARK_IN_A[0], PARK_IN_A[1] + 0.3 * i, object_height(OBJECTS[obj_name]) / 2))
+            i = list(objects).index(obj_name)
+            park = world_from_base(BASE_A, (PARK_IN_A[0], PARK_IN_A[1] + 0.3 * i, object_height(objects[obj_name]) / 2))
             bodies[obj_name].set_world_poses(positions=[list(park)], orientations=[[1.0, 0.0, 0.0, 0.0]])
             bodies[obj_name].set_velocities(np.zeros((1, 3)), np.zeros((1, 3)))
         summary["stats"] = _stats(summary["trials"])
