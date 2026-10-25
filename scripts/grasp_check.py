@@ -23,7 +23,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from restorebot.core.config import M1_BASE_POSE
-from restorebot.core.grasp import TrialObservation, classify_trial, tilt_deg_from_quat_wxyz
+from restorebot.core.grasp import TrialObservation, classify_trial, footprints, tilt_deg_from_quat_wxyz
 from restorebot.core.navigation import in_reach
 from restorebot.core.scene import HOME_V2, Placement, generate_scenario
 from restorebot.sim.app import start_app
@@ -97,6 +97,8 @@ def main() -> int:
     ap.add_argument("--quick", action="store_true")
     ap.add_argument("--gui", action="store_true")
     ap.add_argument("--no-frames", action="store_true", help="斜め上のカメラ（連番画像）を作らない")
+    ap.add_argument("--only", nargs="*", default=None, help="名前にこの文字列を含む試行だけを実行する")
+    ap.add_argument("--scenario-frames", action="store_true", help="散らかし方の試行でも連番画像を保存する")
     ap.add_argument("--seeds", type=int, default=4, help="M1 の散らかし方で試すシードの数（--quick では 0）")
     ap.add_argument("--out", type=Path, default=REPO_ROOT / "outputs" / "m1_13")
     args = ap.parse_args()
@@ -169,12 +171,22 @@ def main() -> int:
             p0 = np.asarray(state.position)
             rec = {"moved_before_grasp": None, "max_lift": 0.0, "lifted": False, "dropped": False}
             counter = {"i": 0}
+            tilts: list[tuple[str, float, float]] = []  # (動作:段階, 時刻, 物体の傾き [deg])。段階が変わるたびに記録
+            trace: list[list] = []  # [動作:段階, 時刻, 物体 x, y, z, 手先 x, y, z]（5 ステップごと）
 
             def monitor(action):
                 def on_step(_):
                     counter["i"] += 1
-                    p = world.object_pose(key)[0]
+                    p, q = world.object_pose(key)
                     lift = p[2] - p0[2]
+                    label = f"{action.name.split(':')[0]}:{action.seq.stage.name}"
+                    if not tilts or tilts[-1][0] != label:
+                        tilts.append((label, round(action.t, 3), round(tilt_deg_from_quat_wxyz(q), 1)))
+                    if (
+                        counter["i"] % 5 == 0
+                    ):  # 物体と手先の位置の記録（運んでいる間に滑ったか、何かに当たったかを見分ける）
+                        hand = ctx.planning.tool_pose()[0]
+                        trace.append([label, round(action.t, 3), *[round(float(c), 4) for c in (*p, *hand)]])
                     if (
                         rec["moved_before_grasp"] is None
                         and action.name.startswith("pick")
@@ -194,7 +206,10 @@ def main() -> int:
                 return on_step
 
             t0 = time.perf_counter()
-            pick = pick_action(ctx, SCENE, state, BASE, lambda: float(world.object_pose(key)[0][2]), object_path(key))
+            neighbors = footprints(SCENE, others0, key)
+            pick = pick_action(
+                ctx, SCENE, state, BASE, lambda: float(world.object_pose(key)[0][2]), object_path(key), neighbors
+            )
             r_pick = run_action(simulation_app, pick, PHYSICS_DT, on_step=monitor(pick))
             out = {
                 "key": key,
@@ -205,13 +220,17 @@ def main() -> int:
             }
             place = None
             if r_pick.status is Status.SUCCEEDED:
-                place = place_action(ctx, target_center, pick.hand_yaw, BASE, object_path(key))
+                shape = SCENE.object(key).shape
+                place = place_action(ctx, shape, target_center, pick.hand_yaw, BASE, object_path(key), neighbors)
                 r_place = run_action(simulation_app, place, PHYSICS_DT, on_step=monitor(place))
                 out["place"] = {"status": r_place.status.value, "reason": r_place.reason, "stages": place.log}
                 out["place"]["t"] = place.t
+                out["place_hand_yaw"] = place.hand_yaw
             for _ in range(int(1.0 / PHYSICS_DT)):  # 置いた後に落ち着くのを待つ
                 simulation_app.update()
             p1, q1 = world.object_pose(key)
+            out["tilts"] = tilts + [("settled", 0.0, round(tilt_deg_from_quat_wxyz(q1), 1))]
+            out["trace"] = trace
             o = TrialObservation(
                 controller_done=place is not None and out["place"]["status"] == "succeeded",
                 moved_before_grasp_m=rec["moved_before_grasp"] or 0.0,
@@ -227,7 +246,8 @@ def main() -> int:
             return out
 
         # ---- 1・2. 決めた位置からの試行 ----
-        for trial in build_trials(args.quick):
+        trials_to_run = [t for t in build_trials(args.quick) if not args.only or any(s in t.name for s in args.only)]
+        for trial in trials_to_run:
             reset({trial.key: trial.start, **trial.others})
             if not in_reach(BASE, (trial.start.x, trial.start.y)):
                 raise RuntimeError(f"{trial.name}：開始位置が届く範囲の外です")
@@ -256,7 +276,10 @@ def main() -> int:
                 for k in sc.moved
             ]
             tasks = plan_tasks(instructions, world, SCENE, BASE)
-            results = [pick_and_place(t.key, t.place_position, None) for t in tasks]
+            frames_root = args.out / "frames" / f"scenario_{seed}" if args.scenario_frames else None
+            results = [
+                pick_and_place(t.key, t.place_position, frames_root / t.key if frames_root else None) for t in tasks
+            ]
             final = {k: world.object_pose(k)[0] for k in SCENE.tidy}
             errors = {
                 k: float(math.hypot(final[k][0] - SCENE.tidy[k].x, final[k][1] - SCENE.tidy[k].y)) for k in sc.moved

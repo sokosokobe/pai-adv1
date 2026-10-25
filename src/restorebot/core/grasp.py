@@ -14,7 +14,7 @@ sim はこの段階の目標を、panda_hand の目標に直して RMPflow に�
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -51,11 +51,23 @@ class GraspParams:
     approach_height: float = 0.15  # 真上へ近づく高さ
     lift_height: float = 0.15  # 持ち上げる・退避する高さ
     place_clearance: float = 0.005  # 置く高さに足す隙間（設計書 9.2）
+    # 指を開いた後の待ち時間と、退避の前に少しだけ真上に上げる高さ。
+    # #13：指を開いてすぐ 15cm を一気に上げると、指にもたれたペン立てが引っかかって倒れた
+    release_settle: float = 0.5
+    clear_height: float = 0.03
+    # 物を持って動く段階の、手先の目標の速さの上限 [m/s]。
+    # #13：待機姿勢へ速く振ると、指の腹と線で接するだけの円柱（ペン立て）が手の中で振れて抜けた
+    carry_speed: float = 0.3
     position_tolerance: float = 0.015
     orientation_tolerance: float = 0.12
     stability_duration: float = 0.10  # 収束したまま、この時間たったら次へ進む
     gripper_dwell: float = 0.20  # 閉じる・開く段階の最短の時間
     timeouts: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_TIMEOUTS))
+    # 隣の物体を避ける手先の向き（choose_grasp_yaw）。手を上から見た長方形（指が閉じる方向の半分の長さ・幅の半分）
+    hand_half_length: float = 0.11  # Franka の手は指が閉じる方向に約 20cm
+    hand_half_width: float = 0.04
+    safe_clearance: float = 0.02  # 手と隣の物体の、上から見た隙間がこれ以上あれば当たらないとみなす
+    yaw_step: float = math.radians(15.0)  # 円柱で試す手先の向きの刻み（基準から ±90°）
 
 
 @dataclass(frozen=True)
@@ -67,24 +79,89 @@ class Stage:
     wait_gripper: bool  # 指の動きが終わるまで待つ（閉じる・開く段階）
     object_is_obstacle: bool  # この段階で、掴む物体を動作計画の障害物として扱うか
     timeout: float
+    min_duration: float = 0.0  # この段階に最低限とどまる時間（閉じる・開く段階は gripper_dwell とのうち長い方）
+    max_speed: float | None = None  # 手先の目標を動かす速さの上限 [m/s]（None は目標をそのまま渡す）
 
 
-def grasp_yaw(shape: str, object_yaw: float, base_yaw: float) -> float:
-    """掴むときの手先の向き。
+def grasp_yaw(shape: str, object_yaw: float, reference_yaw: float) -> float:
+    """掴むときの手先の向き（隣の物体を考えない場合）。
 
     箱は短い辺（物体の y 方向）を掴むよう、手先の向きを物体の向きに合わせる（#4）。180° 回しても同じ掴み方なので、
-    台車の向きに近い方を選び、手首を大きく回さない（台車の向きから ±90° 以内）。円柱は向きによらず台車の向き。
+    基準の向きに近い方を選び、手首を大きく回さない（基準から ±90° 以内）。円柱は向きによらず基準の向き。
+    基準の向きは、台車から物体を見た方向（bearing_yaw）を使う（#13：台車の向きでは左右の端で手首が回りきらなかった）。
     """
     if shape == "cylinder":
-        return base_yaw
+        return reference_yaw
     if shape == "cube":
-        d = wrap_angle(object_yaw - base_yaw)
+        d = wrap_angle(object_yaw - reference_yaw)
         if d > math.pi / 2:
             d -= math.pi
         elif d < -math.pi / 2:
             d += math.pi
-        return base_yaw + d
+        return reference_yaw + d
     raise ValueError(f"上から掴めない形です: {shape}")
+
+
+def bearing_yaw(base: Pose2D, xy: Sequence[float]) -> float:
+    """台車の中心から点 xy を見た方向 [rad]。"""
+    return math.atan2(xy[1] - base.y, xy[0] - base.x)
+
+
+@dataclass(frozen=True)
+class Footprint:
+    """上から見た物体の外接円（隣の物体として避けるため）。"""
+
+    xy: tuple[float, float]
+    radius: float
+
+
+def footprints(scene, positions: Mapping[str, Sequence[float]], exclude: str) -> list[Footprint]:
+    """ほかの物体（exclude 以外）の今の位置 → 隣の物体の外接円の一覧。scene は SceneSpec。"""
+    return [
+        Footprint((float(p[0]), float(p[1])), scene.object(k).footprint_radius)
+        for k, p in positions.items()
+        if k != exclude
+    ]
+
+
+def hand_clearance(center: Sequence[float], yaw: float, other: Footprint, params: GraspParams) -> float:
+    """手（center の真上、向き yaw）を上から見た長方形と、隣の物体の外接円の隙間 [m]（重なれば負）。"""
+    dx, dy = other.xy[0] - center[0], other.xy[1] - center[1]
+    fx, fy = math.sin(yaw), -math.cos(yaw)  # 指が閉じる方向（真下向きの手先の y 方向）
+    along = abs(dx * fx + dy * fy)
+    across = abs(-dx * fy + dy * fx)
+    ex = max(along - params.hand_half_length, 0.0)
+    ey = max(across - params.hand_half_width, 0.0)
+    return math.hypot(ex, ey) - other.radius
+
+
+def choose_grasp_yaw(
+    shape: str,
+    axis_yaw: float,
+    reference_yaw: float,
+    center: Sequence[float],
+    neighbors: Sequence[Footprint],
+    params: GraspParams,
+) -> float:
+    """隣の物体を考えた手先の向き。
+
+    箱：向きは物体の軸（axis_yaw。掴むときは物体の向き、置くときは掴んだときの手先の向き）で決まり、
+    180° 回しても同じなので、基準に近い方（grasp_yaw）。隣の物体は考えない（選べる向きがない）。
+    円柱：基準から ±90° を yaw_step 刻みで試し、手が隣の物体から safe_clearance 以上離れる向きのうち、
+    基準に最も近いもの。どれも離れなければ、隙間が最も大きい向き（#13：指の方向に背の高い物体があると下降できなかった）。
+    """
+    if shape != "cylinder":
+        return grasp_yaw(shape, axis_yaw, reference_yaw)
+    n = round((math.pi / 2) / params.yaw_step)
+    candidates = [reference_yaw + s * k * params.yaw_step for k in range(n + 1) for s in ((1,) if k == 0 else (1, -1))]
+
+    def clearance(yaw: float) -> float:
+        return min((hand_clearance(center, yaw, o, params) for o in neighbors), default=math.inf)
+
+    for yaw in candidates:  # 基準に近い順
+        if clearance(yaw) >= params.safe_clearance:
+            return yaw
+    return max(candidates, key=clearance)
 
 
 def hand_down_quat_wxyz(yaw: float) -> tuple[float, float, float, float]:
@@ -110,31 +187,61 @@ def standby_grasp_position(base: Pose2D) -> tuple[float, float, float]:
     return (base.x + c * hx - s * hy, base.y + s * hx + c * hy, hz - GRASP_OFFSET_Z)
 
 
+def move_toward(current: Sequence[float], target: Sequence[float], max_dist: float) -> tuple[float, float, float]:
+    """current から target へ、最大 max_dist だけ近づいた点（手先の目標を少しずつ動かして速さを抑えるため）。"""
+    d = [t - c for c, t in zip(current, target, strict=True)]
+    n = math.sqrt(sum(x * x for x in d))
+    if n <= max_dist:
+        return tuple(float(t) for t in target)
+    s = max_dist / n
+    return tuple(float(c + s * x) for c, x in zip(current, d, strict=True))
+
+
 def _above(p: Sequence[float], dz: float) -> tuple[float, float, float]:
     return (p[0], p[1], p[2] + dz)
 
 
 def pick_stages(center: Sequence[float], yaw: float, base: Pose2D, params: GraspParams) -> list[Stage]:
-    """掴む：真上 → 下降 → 閉じる → 持ち上げる → 待機姿勢。center は物体の中心（＝掴む位置）。"""
+    """掴む：真上 → 下降 → 閉じる → 持ち上げる → 待機姿勢。center は物体の中心（＝掴む位置）。
+
+    持ち上げてからは手先の速さを carry_speed に抑える。
+    """
     t = params.timeouts
     p = tuple(center)
+    v = params.carry_speed
     return [
         Stage("approach", _above(p, params.approach_height), yaw, Gripper.OPEN, False, True, t["approach"]),
         Stage("descend", p, yaw, Gripper.OPEN, False, False, t["descend"]),
         Stage("grasp", p, yaw, Gripper.CLOSE, True, False, t["grasp"]),
-        Stage("lift", _above(p, params.lift_height), yaw, Gripper.CLOSE, False, False, t["lift"]),
-        Stage("standby", standby_grasp_position(base), base.yaw, Gripper.CLOSE, False, False, t["standby"]),
+        Stage("lift", _above(p, params.lift_height), yaw, Gripper.CLOSE, False, False, t["lift"], max_speed=v),
+        Stage(
+            "standby", standby_grasp_position(base), base.yaw, Gripper.CLOSE, False, False, t["standby"], max_speed=v
+        ),
     ]
 
 
 def place_stages(center: Sequence[float], yaw: float, base: Pose2D, params: GraspParams) -> list[Stage]:
-    """置く：真上 → 下降 → 開く → 退避 → 待機姿勢。center は置いたときの物体の中心。手先は回さない（yaw のまま）。"""
+    """置く：真上 → 下降 → 開く（落ち着くまで待つ）→ 少し上げる → 退避 → 待機姿勢。
+
+    center は置いたときの物体の中心。手先は yaw のまま回さない。
+    """
     t = params.timeouts
     p = _above(center, params.place_clearance)
+    v = params.carry_speed  # 指を開くまでは物を持っているので、手先の速さを抑える
     return [
-        Stage("approach", _above(p, params.approach_height), yaw, Gripper.CLOSE, False, False, t["place_approach"]),
-        Stage("descend", p, yaw, Gripper.CLOSE, False, False, t["place_descend"]),
-        Stage("release", p, yaw, Gripper.OPEN, True, False, t["release"]),
+        Stage(
+            "approach",
+            _above(p, params.approach_height),
+            yaw,
+            Gripper.CLOSE,
+            False,
+            False,
+            t["place_approach"],
+            max_speed=v,
+        ),
+        Stage("descend", p, yaw, Gripper.CLOSE, False, False, t["place_descend"], max_speed=v),
+        Stage("release", p, yaw, Gripper.OPEN, True, False, t["release"], min_duration=params.release_settle),
+        Stage("clear", _above(p, params.clear_height), yaw, Gripper.OPEN, False, False, t["retreat"]),
         Stage("retreat", _above(p, params.lift_height), yaw, Gripper.OPEN, False, False, t["retreat"]),
         Stage("standby", standby_grasp_position(base), base.yaw, Gripper.OPEN, False, True, t["standby"]),
     ]
@@ -186,8 +293,10 @@ class StageSequencer:
         elif self._stable_since is None:
             self._stable_since = t
         complete = converged and t - self._stable_since >= p.stability_duration
+        min_duration = max(stage.min_duration, p.gripper_dwell if stage.wait_gripper else 0.0)
+        complete = complete and t - self._stage_started >= min_duration
         if complete and stage.wait_gripper:
-            complete = t - self._stage_started >= p.gripper_dwell and gripper_done
+            complete = gripper_done
         if complete:
             self.index += 1
             self._stage_started = t

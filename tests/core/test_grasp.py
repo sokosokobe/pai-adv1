@@ -45,6 +45,63 @@ def test_unknown_shape_is_rejected():
         grasp_yaw("sphere", 0.0, 0.0)
 
 
+# ---- 隣の物体を避ける手先の向き ----
+
+
+def test_bearing_yaw():
+    from restorebot.core.grasp import bearing_yaw
+
+    assert bearing_yaw(BASE, (0.75, 0.70)) == pytest.approx(math.pi / 2)  # 正面
+    assert bearing_yaw(BASE, (0.40, 0.62)) == pytest.approx(math.atan2(0.64, -0.35))  # 左の端
+
+
+def _finger_axis(yaw):
+    return (math.sin(yaw), -math.cos(yaw))  # 真下向きの手先の y 方向（指が閉じる方向）
+
+
+def test_cylinder_without_neighbors_uses_reference():
+    from restorebot.core.grasp import choose_grasp_yaw
+
+    assert choose_grasp_yaw("cylinder", 0.0, 1.2, (0.6, 0.7), [], PARAMS) == pytest.approx(1.2)
+
+
+def test_cylinder_turns_fingers_away_from_tall_neighbor():
+    from restorebot.core.grasp import Footprint, choose_grasp_yaw, hand_clearance
+
+    obj = (0.60, 0.70)
+    ref = math.pi / 2  # 指は x 方向に閉じる
+    fx, fy = _finger_axis(ref)
+    neighbor = Footprint((obj[0] + 0.0975 * fx, obj[1] + 0.0975 * fy), 0.0225)  # 指の方向に隙間 5cm（#13 の失敗例）
+    assert hand_clearance(obj, ref, neighbor, PARAMS) < PARAMS.safe_clearance  # 基準の向きでは手が当たる
+    yaw = choose_grasp_yaw("cylinder", 0.0, ref, obj, [neighbor], PARAMS)
+    assert hand_clearance(obj, yaw, neighbor, PARAMS) >= PARAMS.safe_clearance
+    assert abs(wrap_angle(yaw - ref)) <= math.pi / 2 + 1e-9  # 手首は ±90° 以内
+    # 当たらない向きのうち基準に最も近いもの（15° 刻み）
+    step = PARAMS.yaw_step
+    closer = [ref + s * k * step for k in range(round(abs(wrap_angle(yaw - ref)) / step)) for s in (1, -1)]
+    assert all(hand_clearance(obj, y, neighbor, PARAMS) < PARAMS.safe_clearance for y in closer)
+
+
+def test_cylinder_picks_best_clearance_when_none_is_safe():
+    from restorebot.core.grasp import Footprint, choose_grasp_yaw, hand_clearance
+
+    obj = (0.60, 0.70)
+    # 四方を囲まれていて、どの向きでも安全な隙間がとれない → 隙間が最大の向き
+    ring = [Footprint((obj[0] + 0.07 * math.cos(a), obj[1] + 0.07 * math.sin(a)), 0.02) for a in (0, 1.6, 3.1, 4.7)]
+    yaw = choose_grasp_yaw("cylinder", 0.0, 0.3, obj, ring, PARAMS)
+    best = max(min(hand_clearance(obj, 0.3 + k * PARAMS.yaw_step, n, PARAMS) for n in ring) for k in range(-6, 7))
+    assert min(hand_clearance(obj, yaw, n, PARAMS) for n in ring) == pytest.approx(best)
+
+
+def test_box_ignores_neighbors_and_keeps_axis():
+    from restorebot.core.grasp import Footprint, choose_grasp_yaw
+
+    obj = (0.60, 0.70)
+    neighbor = Footprint((0.70, 0.70), 0.03)
+    yaw = choose_grasp_yaw("cube", 0.4, BASE.yaw, obj, [neighbor], PARAMS)
+    assert yaw == pytest.approx(grasp_yaw("cube", 0.4, BASE.yaw))  # 箱は物体の軸で決まる
+
+
 def test_hand_down_quat():
     from restorebot.core.grasp import hand_down_quat_wxyz, quat_angle_wxyz
     from restorebot.core.types import quat_wxyz_from_yaw
@@ -83,16 +140,47 @@ def test_pick_stages():
 def test_place_stages_keep_hand_yaw_and_add_clearance():
     target = (0.45, 0.72, 0.745)
     stages = place_stages(target, 0.3, BASE, PARAMS)
-    assert [s.name for s in stages] == ["approach", "descend", "release", "retreat", "standby"]
-    approach, descend, release, retreat, standby = stages
-    assert descend.position == pytest.approx((0.45, 0.72, 0.745 + PARAMS.place_clearance))
-    assert approach.position[2] == pytest.approx(0.745 + PARAMS.place_clearance + PARAMS.approach_height)
-    assert retreat.position[2] == pytest.approx(0.745 + PARAMS.place_clearance + PARAMS.lift_height)
-    assert [s.gripper for s in stages] == [Gripper.CLOSE, Gripper.CLOSE, Gripper.OPEN, Gripper.OPEN, Gripper.OPEN]
-    assert [s.wait_gripper for s in stages] == [False, False, True, False, False]
+    assert [s.name for s in stages] == ["approach", "descend", "release", "clear", "retreat", "standby"]
+    approach, descend, release, clear, retreat, standby = stages
+    p = 0.745 + PARAMS.place_clearance
+    assert descend.position == pytest.approx((0.45, 0.72, p))
+    assert approach.position[2] == pytest.approx(p + PARAMS.approach_height)
+    # 指を開いたら、まず少しだけ真上に上げてから退避する（#13：一気に上げるとペン立てが指に引っかかって倒れた）
+    assert clear.position == pytest.approx((0.45, 0.72, p + PARAMS.clear_height))
+    assert retreat.position[2] == pytest.approx(p + PARAMS.lift_height)
+    assert release.min_duration == pytest.approx(PARAMS.release_settle)  # 指を開いた後、物体が落ち着くまで待つ
+    assert [s.gripper for s in stages] == [Gripper.CLOSE, Gripper.CLOSE] + [Gripper.OPEN] * 4
+    assert [s.wait_gripper for s in stages] == [False, False, True, False, False, False]
     # 置いて退避するまでは障害物から外したまま、待機姿勢へ戻るときに戻す
-    assert [s.object_is_obstacle for s in stages] == [False, False, False, False, True]
-    assert all(s.yaw == 0.3 for s in stages[:4])  # 置くときに手先を回さない
+    assert [s.object_is_obstacle for s in stages] == [False] * 5 + [True]
+    assert all(s.yaw == 0.3 for s in stages[:5])  # 置いて退避するまで手先を回さない
+
+
+def test_carrying_stages_limit_hand_speed():
+    # 物を持って動く段階だけ、手先の目標の速さを抑える（#13：速く振ると円柱が手から抜けた）
+    pick = pick_stages((0.6, 0.7, 0.745), 0.0, BASE, PARAMS)
+    place = place_stages((0.45, 0.72, 0.745), 0.0, BASE, PARAMS)
+    carry = PARAMS.carry_speed
+    assert [s.max_speed for s in pick] == [None, None, None, carry, carry]
+    assert [s.max_speed for s in place] == [carry, carry, None, None, None, None]
+
+
+def test_move_toward():
+    from restorebot.core.grasp import move_toward
+
+    assert move_toward((0.0, 0.0, 0.0), (0.3, 0.4, 0.0), 0.1) == pytest.approx((0.06, 0.08, 0.0))
+    assert move_toward((0.0, 0.0, 0.0), (0.03, 0.04, 0.0), 0.1) == pytest.approx((0.03, 0.04, 0.0))  # 近ければ目標へ
+    assert move_toward((1.0, 1.0, 1.0), (1.0, 1.0, 1.0), 0.1) == pytest.approx((1.0, 1.0, 1.0))
+
+
+def test_stage_min_duration_delays_advance():
+    from restorebot.core.grasp import Stage
+
+    stage = Stage("release", (0.0, 0.0, 0.0), 0.0, Gripper.OPEN, True, False, 2.0, min_duration=0.5)
+    seq = StageSequencer([stage], GraspParams(stability_duration=0.0, gripper_dwell=0.2))
+    seq.start(0.0)
+    assert seq.update(0.3, 0.0, 0.0, gripper_done=True) is Status.RUNNING  # 指は開いたが 0.5 秒たっていない
+    assert seq.update(0.5, 0.0, 0.0, gripper_done=True) is Status.SUCCEEDED
 
 
 def test_standby_grasp_position_is_below_hand():

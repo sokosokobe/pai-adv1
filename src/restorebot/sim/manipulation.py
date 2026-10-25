@@ -21,12 +21,15 @@ from isaacsim.robot_motion.cumotion import RmpFlowController
 
 from restorebot.core.grasp import (
     GRASP_OFFSET_Z,
+    Footprint,
     GraspParams,
     Gripper,
     Stage,
     StageSequencer,
-    grasp_yaw,
+    bearing_yaw,
+    choose_grasp_yaw,
     hand_down_quat_wxyz,
+    move_toward,
     pick_stages,
     place_stages,
     quat_angle_wxyz,
@@ -98,11 +101,14 @@ class StagedAction:
         self._obstacle_enabled = True
         self.log: list[tuple[str, float]] = []  # (段階, 開始時刻) の記録
         self.hand_yaw = stages[0].yaw  # 最初の段階の手先の向き（pick では掴むときの向き。place に渡す）
+        self._cmd_stage = -1  # 手先の目標を少しずつ動かしている段階
+        self._cmd_pos: tuple[float, float, float] | None = None
 
     def start(self) -> None:
         self.t = 0.0
         self.seq.start(0.0)
         self._stage_index = -1
+        self._cmd_stage = -1
 
     def _set_obstacle(self, enabled: bool) -> None:
         if self.obstacle_prim is not None and enabled != self._obstacle_enabled:
@@ -144,6 +150,13 @@ class StagedAction:
             return self._finish(status, self.seq.failure_reason)
         stage = self.seq.stage  # 次の段階に進んだ場合は、次の目標で動かす
         target_pos, target_q = self._hand_target(stage)
+        if stage.max_speed is not None:
+            # 物を持って動く段階：手先の目標を、今の手先の位置から max_speed で少しずつ動かす（速く振らない）
+            if self._cmd_stage != self.seq.index:
+                self._cmd_stage = self.seq.index
+                self._cmd_pos = tuple(float(c) for c in hand_pos)
+            self._cmd_pos = move_toward(self._cmd_pos, target_pos, stage.max_speed * dt)
+            target_pos = self._cmd_pos
         planning.apply(self._arm.forward(state, planning.target_state(target_pos, target_q), self.t))
         planning.apply(self.ctx.grippers[stage.gripper].forward(state, None, self.t))
         return StepResult(Status.RUNNING)
@@ -162,9 +175,14 @@ def pick_action(
     base: Pose2D,
     object_z: Callable[[], float],
     obstacle_prim: str,
+    neighbors: Sequence[Footprint] = (),
 ) -> StagedAction:
-    """物体 obj を掴んで持ち上げ、待機姿勢へ。最後に物体が LIFT_MIN 以上持ち上がっていなければ失敗（掴み損ね）。"""
-    yaw = grasp_yaw(scene.object(obj.key).shape, obj.yaw, base.yaw)
+    """物体 obj を掴んで持ち上げ、待機姿勢へ。最後に物体が LIFT_MIN 以上持ち上がっていなければ失敗（掴み損ね）。
+
+    手先の向きは、台車から物体を見た方向を基準に、隣の物体 neighbors に手が当たらない向きを選ぶ（choose_grasp_yaw）。
+    """
+    xy = obj.position[:2]
+    yaw = choose_grasp_yaw(scene.object(obj.key).shape, obj.yaw, bearing_yaw(base, xy), xy, neighbors, ctx.params)
     z0 = obj.position[2]
 
     def check(_: Status) -> StepResult:
@@ -178,10 +196,23 @@ def pick_action(
 
 
 def place_action(
-    ctx: ArmContext, position: Sequence[float], hand_yaw: float, base: Pose2D, obstacle_prim: str
+    ctx: ArmContext,
+    shape: str,
+    position: Sequence[float],
+    hand_yaw: float,
+    base: Pose2D,
+    obstacle_prim: str,
+    neighbors: Sequence[Footprint] = (),
 ) -> StagedAction:
-    """掴んでいる物体を position（置いたときの物体の中心）に置き、待機姿勢へ。手先は hand_yaw のまま回さない。"""
-    stages = place_stages(position, hand_yaw, base, ctx.params)
+    """掴んでいる物体を position（置いたときの物体の中心）に置き、待機姿勢へ。
+
+    物体の向きは変えない（設計書 18 章 Q3）。箱は掴んだときの手先の向き hand_yaw か、それを 180° 回した向き
+    （箱の形は同じ）のうち、台車から置く位置を見た方向に近い方。円柱は軸のまわりに回しても見た目が変わらないので、
+    置く位置の隣の物体に手が当たらない向きを選び直す（#13）。
+    """
+    xy = position[:2]
+    yaw = choose_grasp_yaw(shape, hand_yaw, bearing_yaw(base, xy), xy, neighbors, ctx.params)
+    stages = place_stages(position, yaw, base, ctx.params)
     return StagedAction(f"place:{obstacle_prim.rsplit('/', 1)[-1]}", ctx, stages, obstacle_prim=obstacle_prim)
 
 

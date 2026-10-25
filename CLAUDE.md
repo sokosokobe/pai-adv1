@@ -13,6 +13,11 @@
 - Windows 11 / PowerShell。WSL は使わない
 - Python：`.venv\Scripts\python.exe`（Python 3.12、Isaac Sim 6.1.0 を pip で導入済み）
 - GPU：RTX 5070（12GB）、RAM 32GB。重いシーン、高解像度、多数のカメラは避ける
+- NVIDIA ドライバー：**616.64 に固定する**（自動更新しない）
+  - 2026-10-25、621.01（10/19 に自動更新）では、RidgebackFranka の読み込み中や制御ループの途中で Isaac Sim が不定期に異常終了した（access violation。読み込みは約 10 回中 2 回しか成功しない）。616.64 に戻すと解消した
+  - スモークテスト（Franka 単体）は 621.01 でも通るので、この問題は検出できない
+  - Isaac Sim 6.1 の公式の検証済みドライバーは 595.97（Windows）。616.64 はそれより新しいが、M0 から問題なく動いている
+  - 不定期に異常終了したら、まず `nvidia-smi` でドライバーのバージョンを確かめる。異常終了の後に `.venv/Lib/site-packages/isaacsim/kit/cache/DerivedDataCache` が壊れることがある（消してよい。自動で作り直される）
 - EULA：環境変数 `OMNI_KIT_ACCEPT_EULA=YES`
 - Isaac Sim の起動は、初回が約110秒、2回目以降が約8秒
 - Windows のスマート アプリ コントロールがオン（設定は変更しない）。署名のない実行ファイルや DLL は阻止されることがある
