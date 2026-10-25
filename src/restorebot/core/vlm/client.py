@@ -11,6 +11,7 @@ API キーはリポジトリ直下の .env から読み込む（make_client）�
 from __future__ import annotations
 
 import base64
+import json
 import os
 import time
 from collections.abc import Sequence
@@ -213,6 +214,29 @@ class DummyVlmClient:
         if isinstance(item, VlmResult):
             return item
         return VlmResult(text=item, input_tokens=0, output_tokens=0, latency_s=0.0, model=self.name, cost_usd=0.0)
+
+
+def truth_response(scene, current: dict, target: dict) -> str:
+    """シミュレータの真値から、VLM の応答（JSON、ピクセル座標）を作る。API を呼ばずにエピソードを試すため。
+
+    current・target は物体の key → 中心のワールド座標。VLM の点は物体の中心の投影に当たる（#12）ので、それに合わせる。
+    scene は SceneSpec。
+    """
+    cam = scene.camera
+    moves = []
+    for key in current:
+        u, v = cam.project(current[key])
+        tu, tv = cam.project(target[key])
+        moves.append(
+            {
+                "name": scene.object(key).name,
+                "current_location": "",
+                "current_point": [round(u, 1), round(v, 1)],
+                "target_location": "",
+                "target_point": [round(tu, 1), round(tv, 1)],
+            }
+        )
+    return json.dumps({"moved_objects": moves}, ensure_ascii=False)
 
 
 def make_client(key: str) -> VlmClient:
