@@ -177,6 +177,28 @@ def test_route_between_free_poses_is_direct():
     assert route[-1] == goal and len(route) <= 2
 
 
+def test_route_escapes_forward_when_wall_is_behind():
+    # 撮影で下がった後など、壁を背にして膨張の内側にいるときは、前に出てから進む（#17）
+    start = Pose2D(0.0, -0.80, math.pi / 2)
+    assert not _free((start.x, start.y))
+    goal = approach_pose((-1.45, -0.10), "side_table", SCENE, start=start)
+    route = plan_route(SCENE, GRID, start, goal)
+    _check_route(route, start, goal)
+    assert route[0].y > start.y and route[0].yaw == pytest.approx(start.yaw)  # 向きを変えずに前へ
+
+
+def test_route_escapes_diagonally_near_desk_corner_and_wall():
+    # 机の右端の物体を掴んだ止め位置：まっすぐ下がっても東の壁の膨張から出られないので、斜め後ろへ（#17 のシード 2）
+    # 止め位置は x = 1.2965 だが、追従の誤差で少し右にずれると、まっすぐ下がった先がすべて東の壁の膨張の内側になる
+    start = Pose2D(1.31, -0.02, math.pi / 2)
+    assert robot_clearance(start, SCENE, ROBOT) >= ROBOT.furniture_gap - 1e-6
+    assert all(not _free((start.x, start.y - d)) for d in np.arange(0.0, NAV.max_backoff + 1e-9, 0.02))
+    goal = approach_pose((-1.46, -0.19), "side_table", SCENE, start=start)
+    route = plan_route(SCENE, GRID, start, goal)
+    _check_route(route, start, goal)
+    assert route[0].x < start.x and route[0].y < start.y and route[0].yaw == pytest.approx(start.yaw)
+
+
 def test_route_none_when_goal_unreachable():
     assert plan_route(SCENE, GRID, M1_BASE_POSE, Pose2D(0.8, 0.85, 0.0)) is None
 

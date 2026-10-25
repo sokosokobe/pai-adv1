@@ -28,7 +28,8 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
-from restorebot.core.config import M1_BASE_POSE
+from restorebot.core.config import M1_BASE_POSE, M2_START_POSE
+from restorebot.core.navigation import robot_clearance
 from restorebot.core.scene import HOME_V2, generate_scenario
 from restorebot.core.types import Pose2D
 from restorebot.sim.app import start_app
@@ -41,7 +42,7 @@ SUCCESS_TOL = 0.03  # 成功の基準：戻し先から水平 3cm 以内（設�
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--milestone", choices=["m1"], default="m1")
+    ap.add_argument("--milestone", choices=["m1", "m2"], default="m1")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--vlm", choices=["truth", "claude"], default="truth")
     ap.add_argument("--record", action="store_true", help="撮影用のカメラの動画を作る")
@@ -67,7 +68,13 @@ def main() -> int:
         from restorebot.sim.scene_builder import PHYSICS_DT, build_scene, set_robot_pose
         from restorebot.sim.world import SimCeilingCamera, SimWorld
 
-        scenario = generate_scenario(SCENE, args.seed, surfaces=("desk",), reach_from=M1_BASE_POSE)
+        if args.milestone == "m1":  # 机の上だけ、M1 の止め位置から届く範囲
+            scenario = generate_scenario(SCENE, args.seed, surfaces=("desk",), reach_from=M1_BASE_POSE)
+            start_pose = M1_BASE_POSE
+        else:  # 机と低い棚の両方
+            scenario = generate_scenario(SCENE, args.seed)
+            start_pose = M2_START_POSE
+        result["placements"] = {k: [p.surface, p.x, p.y, p.yaw] for k, p in scenario.placements.items()}
         result["moved"] = list(scenario.moved)
 
         # ---- 準備 1：いつもの写真（ロボットは部屋の外）----
@@ -77,7 +84,7 @@ def main() -> int:
         reference = camera.capture()
 
         # ---- 準備 2：台車を止め位置に置き、物体を散らかす ----
-        set_robot_pose(simulation_app, sim, M1_BASE_POSE, rb.STANDBY_ARM)
+        set_robot_pose(simulation_app, sim, start_pose, rb.STANDBY_ARM)
         world.set_placements(dict(scenario.placements))
         for _ in range(60):
             simulation_app.update()
@@ -98,8 +105,18 @@ def main() -> int:
 
             recorder = Recorder(sim, out, world.robot_pose)
 
+        track = {"steps": 0, "min_clearance": float("inf"), "at": None, "trajectory": []}
+
         class Stepper:
             def step(self) -> float:
+                # 台車の外形と家具・壁の距離（当たっていないかの確認）と、軌跡（10Hz）
+                pose = world.robot_pose()
+                c = robot_clearance(pose, SCENE)
+                if c < track["min_clearance"]:
+                    track["min_clearance"], track["at"] = c, [pose.x, pose.y, pose.yaw]
+                if track["steps"] % 6 == 0:
+                    track["trajectory"].append([round(pose.x, 4), round(pose.y, 4), round(pose.yaw, 4)])
+                track["steps"] += 1
                 simulation_app.update()
                 if recorder is not None:
                     recorder.on_step()
@@ -132,6 +149,9 @@ def main() -> int:
                 "home_err_m": errors,
                 "all_returned": all(e <= SUCCESS_TOL for e in errors.values()),
                 "untouched_moved_m": untouched,
+                "min_clearance_m": track["min_clearance"],
+                "min_clearance_at": track["at"],
+                "trajectory": track["trajectory"],
                 "sim_time_s": log.sim_time_s,
                 "cost_usd": log.to_dict()["cost_usd"],
             }

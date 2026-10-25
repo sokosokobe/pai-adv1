@@ -16,7 +16,8 @@ import io
 import math
 from dataclasses import dataclass
 
-from restorebot.core.navigation import in_reach
+from restorebot.core.config import NAV, ROBOT
+from restorebot.core.navigation import approach_pose, build_grid, in_reach, plan_route, retreat_pose
 from restorebot.core.occlusion import needs_retake, robot_mask
 from restorebot.core.report import EpisodeLog, TaskRecord, detection_to_dict
 from restorebot.core.scene import SceneSpec
@@ -66,8 +67,8 @@ class Episode:
         *,
         meta: dict | None = None,
     ) -> None:
-        if (config or EpisodeConfig()).milestone != "m1":
-            raise NotImplementedError("今は M1（台車を動かさない）だけ。M2 は #17 で足す")
+        if (config or EpisodeConfig()).milestone not in ("m1", "m2"):
+            raise ValueError(f"未知の milestone です: {config.milestone}")
         self.scene = scene
         self.world = world
         self.camera = camera
@@ -79,6 +80,8 @@ class Episode:
         self.reference: Observation | None = None  # いつもの写真（teach() で撮る、または外から与える）
         self.t = 0.0  # シミュレーションの経過時間 [s]
         self.log = EpisodeLog()
+        self.moves = self.config.milestone == "m2"  # 台車を動かすか
+        self.grid = build_grid(scene, ROBOT.circumradius + NAV.inflation_margin, NAV.resolution) if self.moves else None
 
     def teach(self) -> Observation:
         """いつもの写真を撮る（ロボットが写らない状態で呼ぶ）。"""
@@ -114,12 +117,79 @@ class Episode:
             if not hidden:
                 return obs
             if attempt < cfg.max_retakes:
-                self.log.event(self.t, "retake", "ロボットが天板の物体を置ける範囲を隠している", attempt=attempt + 1)
+                retreated = False
+                if self.moves:  # M2：まっすぐ下がって撮り直す（設計書 7.2・8.4）
+                    back = retreat_pose(self.world.robot_pose(), NAV.shoot_retreat, self.scene)
+                    if back is not None:
+                        r = self._run(self.robot.navigate([back]))
+                        retreated = r.status is Status.SUCCEEDED
+                self.log.event(
+                    self.t,
+                    "retake",
+                    "ロボットが天板の物体を置ける範囲を隠している",
+                    attempt=attempt + 1,
+                    retreated=retreated,
+                )
             else:
                 self.log.event(self.t, "still_hidden", f"{cfg.max_retakes} 回撮り直しても隠れている。この写真で進める")
         return obs
 
+    def _go_to(self, xy, surface: str | None) -> str | None:
+        """M2：家具 surface の上の点 xy を掴む・置くための止め位置へ移動する。失敗の理由を返す（成功なら None）。
+
+        今の位置からすでに楽に届くなら動かない。
+        """
+        base = self.world.robot_pose()
+        if in_reach(base, xy):
+            return None
+        if surface is None:
+            return "物体が天板の上にない"
+        goal = approach_pose(xy, surface, self.scene, start=base)
+        if goal is None:
+            return "止め位置がない（届かない）"
+        route = plan_route(self.scene, self.grid, base, goal)
+        if route is None:
+            return "経路がない"
+        r = self._run(self.robot.navigate(route))
+        if r.status is not Status.SUCCEEDED:
+            return r.reason or "移動に失敗"
+        self.log.event(self.t, "arrived", "", pose=[goal.x, goal.y, goal.yaw])
+        return None
+
+    def _do_task_m2(self, task) -> TaskRecord:
+        rec = TaskRecord(task.key, tuple(task.place_position), tuple(task.pick.position), started_s=self.t)
+        for _ in range(self.config.max_grasp_retries + 1):
+            self._arm_to("standby")
+            obj = self.world.object_state(task.key)  # 掴み損ねて物体が動いたかもしれないので、毎回取り直す
+            reason = self._go_to(obj.position[:2], obj.surface)
+            if reason is not None:
+                rec.status, rec.reason = "skipped", reason
+                return rec
+            rec.pick_attempts += 1
+            r = self._run(self.robot.pick(obj))
+            if r.status is Status.SUCCEEDED:
+                break
+            rec.reason = r.reason
+            self.log.event(self.t, "pick_failed", r.reason or "", key=task.key, attempt=rec.pick_attempts)
+        else:
+            self._arm_to("standby")
+            rec.status = "skipped"
+            return rec
+        reason = self._go_to(task.place_position[:2], task.place_surface)  # 物を持ったまま運ぶ（#15）
+        if reason is not None:
+            rec.status, rec.reason = "failed", reason
+            return rec
+        r = self._run(self.robot.place(task.place_position, task.place_yaw))
+        if r.status is Status.SUCCEEDED:
+            rec.status, rec.reason = "succeeded", None
+        else:
+            rec.status, rec.reason = "failed", r.reason
+            self._arm_to("standby")
+        return rec
+
     def _do_task(self, task, base) -> TaskRecord:
+        if self.moves:
+            return self._do_task_m2(task)
         rec = TaskRecord(task.key, tuple(task.place_position), tuple(task.pick.position), started_s=self.t)
         pick_xy, place_xy = task.pick.position[:2], task.place_position[:2]
         if not (in_reach(base, pick_xy) and in_reach(base, place_xy)):

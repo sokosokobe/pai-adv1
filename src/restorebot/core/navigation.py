@@ -273,17 +273,25 @@ def _back(pose: Pose2D, d: float) -> Pose2D:
 
 
 def _escape(pose: Pose2D, grid: GridMap, scene: SceneSpec, robot: RobotGeometry, nav: NavConfig) -> Pose2D | None:
-    """pose が膨張の内側なら、向きを変えずにまっすぐ下がって膨張の外に出た点。途中で家具・壁に近づけば None。"""
+    """pose が膨張の内側なら、向きを変えずにまっすぐ動いて膨張の外に出た点。
+
+    後ろ → 斜め後ろ（左・右）→ 前 → 左 → 右の順に試す（#17）。止め位置では後ろ。家具の端の近くで壁の膨張にも
+    入っているときは斜め後ろ（机の右端の物体を掴んだ後に、まっすぐ下がっても東の壁の膨張から出られなかった）。
+    撮影で下がった後に壁を背にしているときは前。
+    途中で家具・壁との距離が min_gap 未満になる方向は使わない。どの方向でも出られなければ None。
+    """
     if not grid.occupied_at((pose.x, pose.y)):
         return pose
-    d = 0.0
-    while d < nav.max_backoff:
-        d = min(d + nav.backoff_step, nav.max_backoff)
-        p = _back(pose, d)
-        if robot_clearance(p, scene, robot) < nav.min_gap:
-            return None
-        if not grid.occupied_at((p.x, p.y)):
-            return p
+    for angle in (math.pi, 3 * math.pi / 4, -3 * math.pi / 4, 0.0, math.pi / 2, -math.pi / 2):
+        ux, uy = math.cos(pose.yaw + angle), math.sin(pose.yaw + angle)
+        d = 0.0
+        while d < nav.max_backoff:
+            d = min(d + nav.backoff_step, nav.max_backoff)
+            p = Pose2D(pose.x + d * ux, pose.y + d * uy, pose.yaw)
+            if robot_clearance(p, scene, robot) < nav.min_gap:
+                break
+            if not grid.occupied_at((p.x, p.y)):
+                return p
     return None
 
 
