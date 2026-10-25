@@ -1,0 +1,219 @@
+"""restorebot.core.grasp（掴む・置くの段階の列、段階を進める判定、手先の向き、成功の判定）の単体テスト。"""
+
+import math
+
+import pytest
+
+from restorebot.core.grasp import (
+    GRASP_OFFSET_Z,
+    GraspParams,
+    Gripper,
+    StageSequencer,
+    TrialObservation,
+    classify_trial,
+    grasp_yaw,
+    pick_stages,
+    place_stages,
+    standby_grasp_position,
+)
+from restorebot.core.navigation import wrap_angle
+from restorebot.core.types import Pose2D, Status
+
+BASE = Pose2D(0.75, -0.02, math.pi / 2)
+PARAMS = GraspParams()
+
+
+# ---- 手先の向き ----
+
+
+@pytest.mark.parametrize("object_yaw", [0.0, 0.5, 1.5, 2.5, -2.5, math.pi, -math.pi / 2])
+def test_box_grasp_yaw_matches_object_axis_and_stays_near_base(object_yaw):
+    yaw = grasp_yaw("cube", object_yaw, BASE.yaw)
+    # 箱は物体の軸に合わせる（180° 回しても同じ掴み方）
+    assert math.sin(yaw - object_yaw) == pytest.approx(0.0, abs=1e-9)
+    # 台車の向きから ±90° 以内（手首を大きく回さない）
+    assert abs(wrap_angle(yaw - BASE.yaw)) <= math.pi / 2 + 1e-9
+
+
+@pytest.mark.parametrize("object_yaw", [0.0, 1.0, -2.0])
+def test_cylinder_grasp_yaw_follows_base(object_yaw):
+    assert grasp_yaw("cylinder", object_yaw, BASE.yaw) == pytest.approx(BASE.yaw)
+
+
+def test_unknown_shape_is_rejected():
+    with pytest.raises(ValueError):
+        grasp_yaw("sphere", 0.0, 0.0)
+
+
+def test_hand_down_quat():
+    from restorebot.core.grasp import hand_down_quat_wxyz, quat_angle_wxyz
+    from restorebot.core.types import quat_wxyz_from_yaw
+
+    assert hand_down_quat_wxyz(0.0) == pytest.approx((0.0, 1.0, 0.0, 0.0))  # サンプルの真下向き
+    # yaw ⊗ (0, 1, 0, 0) と一致する
+    w1, x1, y1, z1 = quat_wxyz_from_yaw(0.8)
+    expected = (-x1, w1, z1, -y1)  # (w1, x1, y1, z1) ⊗ (0, 1, 0, 0) の展開
+    assert hand_down_quat_wxyz(0.8) == pytest.approx(expected)
+    # 向きの差：yaw が 0.3 違えば 0.3、q と -q は同じ
+    assert quat_angle_wxyz(hand_down_quat_wxyz(0.0), hand_down_quat_wxyz(0.3)) == pytest.approx(0.3)
+    q = hand_down_quat_wxyz(1.0)
+    assert quat_angle_wxyz(q, tuple(-c for c in q)) == pytest.approx(0.0, abs=1e-6)
+
+
+# ---- 段階の列 ----
+
+
+def test_pick_stages():
+    center = (0.6, 0.7, 0.745)
+    stages = pick_stages(center, 0.3, BASE, PARAMS)
+    assert [s.name for s in stages] == ["approach", "descend", "grasp", "lift", "standby"]
+    approach, descend, grasp, lift, standby = stages
+    assert approach.position == pytest.approx((0.6, 0.7, 0.745 + PARAMS.approach_height))
+    assert descend.position == pytest.approx(center) and grasp.position == pytest.approx(center)
+    assert lift.position == pytest.approx((0.6, 0.7, 0.745 + PARAMS.lift_height))
+    assert standby.position == pytest.approx(standby_grasp_position(BASE))
+    assert [s.gripper for s in stages] == [Gripper.OPEN, Gripper.OPEN, Gripper.CLOSE, Gripper.CLOSE, Gripper.CLOSE]
+    assert [s.wait_gripper for s in stages] == [False, False, True, False, False]
+    # 掴む物体は、下降を始めたら障害物から外す（掴んでいる間も外したまま）
+    assert [s.object_is_obstacle for s in stages] == [True, False, False, False, False]
+    # 掴むまでは物体の向きに合わせた手先の向き、待機姿勢は台車の向き
+    assert all(s.yaw == 0.3 for s in stages[:4]) and standby.yaw == BASE.yaw
+
+
+def test_place_stages_keep_hand_yaw_and_add_clearance():
+    target = (0.45, 0.72, 0.745)
+    stages = place_stages(target, 0.3, BASE, PARAMS)
+    assert [s.name for s in stages] == ["approach", "descend", "release", "retreat", "standby"]
+    approach, descend, release, retreat, standby = stages
+    assert descend.position == pytest.approx((0.45, 0.72, 0.745 + PARAMS.place_clearance))
+    assert approach.position[2] == pytest.approx(0.745 + PARAMS.place_clearance + PARAMS.approach_height)
+    assert retreat.position[2] == pytest.approx(0.745 + PARAMS.place_clearance + PARAMS.lift_height)
+    assert [s.gripper for s in stages] == [Gripper.CLOSE, Gripper.CLOSE, Gripper.OPEN, Gripper.OPEN, Gripper.OPEN]
+    assert [s.wait_gripper for s in stages] == [False, False, True, False, False]
+    # 置いて退避するまでは障害物から外したまま、待機姿勢へ戻るときに戻す
+    assert [s.object_is_obstacle for s in stages] == [False, False, False, False, True]
+    assert all(s.yaw == 0.3 for s in stages[:4])  # 置くときに手先を回さない
+
+
+def test_standby_grasp_position_is_below_hand():
+    # 待機姿勢：台車座標で手先 (0.4, 0, 0.95)。指先の間はその 0.1034m 下
+    x, y, z = standby_grasp_position(Pose2D(1.0, 2.0, 0.0))
+    assert (x, y, z) == pytest.approx((1.4, 2.0, 0.95 - GRASP_OFFSET_Z))
+    x, y, _ = standby_grasp_position(Pose2D(0.0, 0.0, math.pi / 2))
+    assert (x, y) == pytest.approx((0.0, 0.4))
+
+
+# ---- 段階を進める判定 ----
+
+
+def _seq(stages=None, **kw):
+    params = GraspParams(**kw)
+    stages = stages or pick_stages((0.6, 0.7, 0.745), 0.0, BASE, params)
+    seq = StageSequencer(stages, params)
+    seq.start(0.0)
+    return seq
+
+
+def test_advances_after_stable_convergence():
+    seq = _seq(stability_duration=0.1)
+    assert seq.update(0.05, 0.001, 0.0, gripper_done=False) is Status.RUNNING  # 収束し始め
+    assert seq.stage.name == "approach"
+    assert seq.update(0.10, 0.001, 0.0, gripper_done=False) is Status.RUNNING  # まだ 0.05 秒
+    assert seq.update(0.16, 0.001, 0.0, gripper_done=False) is Status.RUNNING
+    assert seq.stage.name == "descend"
+
+
+def test_stability_timer_resets_when_error_grows():
+    seq = _seq(stability_duration=0.1)
+    seq.update(0.0, 0.001, 0.0, gripper_done=False)
+    seq.update(0.05, 0.05, 0.0, gripper_done=False)  # 離れた
+    seq.update(0.12, 0.001, 0.0, gripper_done=False)  # 収束し直し（ここから 0.1 秒）
+    assert seq.stage.name == "approach"
+    seq.update(0.23, 0.001, 0.0, gripper_done=False)
+    assert seq.stage.name == "descend"
+
+
+def test_orientation_error_blocks_convergence():
+    seq = _seq(stability_duration=0.0)
+    seq.update(0.1, 0.001, 0.5, gripper_done=False)
+    assert seq.stage.name == "approach"
+
+
+def test_grasp_waits_for_gripper_and_dwell():
+    seq = _seq(stability_duration=0.0, gripper_dwell=0.2)
+    seq.update(0.0, 0.0, 0.0, False)  # approach → descend
+    seq.update(0.1, 0.0, 0.0, False)  # descend → grasp（t = 0.1 で開始）
+    assert seq.stage.name == "grasp"
+    seq.update(0.2, 0.0, 0.0, gripper_done=True)  # 0.1 秒しかたっていない
+    assert seq.stage.name == "grasp"
+    seq.update(0.35, 0.0, 0.0, gripper_done=False)  # 指がまだ動いている
+    assert seq.stage.name == "grasp"
+    seq.update(0.4, 0.0, 0.0, gripper_done=True)
+    assert seq.stage.name == "lift"
+
+
+def test_succeeds_after_last_stage():
+    seq = _seq(stability_duration=0.0, gripper_dwell=0.0)
+    status, t = Status.RUNNING, 0.0
+    while status is Status.RUNNING and t < 5.0:
+        status = seq.update(t, 0.0, 0.0, gripper_done=True)
+        t += 0.1
+    assert status is Status.SUCCEEDED
+    assert seq.done
+
+
+def test_timeout_fails_with_reason():
+    seq = _seq()
+    timeout = seq.stage.timeout
+    assert seq.update(timeout - 0.01, 0.2, 0.0, False) is Status.RUNNING
+    assert seq.update(timeout + 0.01, 0.2, 0.0, False) is Status.FAILED
+    assert "approach" in seq.failure_reason and "0.2" in seq.failure_reason
+
+
+def test_timeout_is_measured_from_stage_start():
+    seq = _seq(stability_duration=0.0)
+    seq.update(3.0, 0.0, 0.0, False)  # approach → descend（t = 3.0 で開始）
+    timeout = seq.stage.timeout
+    assert seq.update(3.0 + timeout - 0.01, 0.2, 0.0, False) is Status.RUNNING
+
+
+def test_update_before_start_is_an_error():
+    seq = StageSequencer(pick_stages((0.6, 0.7, 0.745), 0.0, BASE, PARAMS), PARAMS)
+    with pytest.raises(RuntimeError):
+        seq.update(0.0, 0.0, 0.0, False)
+
+
+# ---- 成功の判定（#4 の classify_trial）----
+
+
+def _obs(**kw):
+    base = dict(
+        controller_done=True,
+        moved_before_grasp_m=0.0,
+        max_lift_m=0.10,
+        dropped=False,
+        place_xy_err_m=0.005,
+        tilt_deg=1.0,
+    )
+    return TrialObservation(**{**base, **kw})
+
+
+@pytest.mark.parametrize(
+    ("kw", "expected"),
+    [
+        ({}, "success"),
+        ({"moved_before_grasp_m": 0.02}, "collision_before_grasp"),
+        ({"max_lift_m": 0.01}, "grasp_miss"),
+        ({"dropped": True}, "dropped"),
+        ({"tilt_deg": 20.0}, "tipped"),
+        ({"place_xy_err_m": 0.04}, "placement_off"),
+        ({"controller_done": False}, "controller_failure"),
+    ],
+)
+def test_classify_trial(kw, expected):
+    assert classify_trial(_obs(**kw)) == expected
+
+
+def test_classify_uses_3cm_success_criterion():
+    # 設計書 13 章：戻し先から水平 3cm 以内（#4 の検証では 2cm だった）
+    assert classify_trial(_obs(place_xy_err_m=0.025)) == "success"
