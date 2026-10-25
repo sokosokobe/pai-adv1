@@ -62,7 +62,9 @@ class TidyTask:
     key: str
     pick: ObjectState  # 掴む物体（M1〜M2 は真値）
     place_position: tuple[float, float, float]
-    place_yaw: float  # 置くときの手先の向き。掴んだときの向きのまま（物体の向きは戻さない）
+    # 置いたときの物体の向き [rad]。物体の向きは戻さないので、掴んだときの物体の向きのまま（設計書 18 章 Q3）。
+    # 手先の向きは、物体の形に合わせて sim の掴む処理が決める
+    place_yaw: float
     place_surface: str
 
 

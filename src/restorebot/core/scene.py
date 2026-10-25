@@ -141,6 +141,13 @@ class SceneSpec:
                 return o
         raise KeyError(key)
 
+    def surface_at(self, xy: Sequence[float]) -> Surface | None:
+        """水平位置 xy の上にある天板（なければ None）。天板どうしは重ならない前提。"""
+        for s in self.surfaces.values():
+            if abs(xy[0] - s.center[0]) <= s.size[0] / 2 and abs(xy[1] - s.center[1]) <= s.size[1] / 2:
+                return s
+        return None
+
     def object_center(self, key: str, placement: Placement) -> tuple[float, float, float]:
         """物体の中心のワールド座標（面の上に置いたとき）。"""
         return (placement.x, placement.y, self.surfaces[placement.surface].z + self.object(key).height / 2)
