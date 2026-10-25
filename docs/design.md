@@ -143,7 +143,7 @@ stateDiagram-v2
 ```
 
 - M1 では `NavigateToPick` と `NavigateToPlace` は「何もしない」（台車は最初から机の正面にいる）
-- `RetreatForPhoto` は M1 でも使う（台車は撮影位置から作業位置へ動かない場合も、アームを畳む）
+- `RetreatForPhoto` は M1 では台車を動かさず、アームを撮影姿勢（9.3。台車の後ろ側へ回した姿勢）にするだけ（#14）。M2 では撮影位置へ下がる
 
 ### 2.3 失敗時の扱い
 
@@ -186,7 +186,9 @@ stateDiagram-v2
   │   ├── types.py          # Pose2D、ObjectState、Observation など（3.3）
   │   ├── scene.py          # SceneSpec と HOME_V2（部屋・置き場所・物体・いつもの配置・カメラ）
   │   ├── camera.py         # DownCamera（投影・逆投影）
-  │   ├── vlm/              # client.py（VlmClient、Claude・Gemini・Dummy）、prompt.py、parse.py
+  │   ├── vlm/              # client.py（VlmClient、Claude・Gemini・Dummy、真値の応答）、prompt.py、parse.py、detect.py（問い合わせと再試行。#12）
+  │   ├── grasp.py          # 掴む・置くの段階の列と進める判定、手先の向きの選び方（#13）
+  │   ├── report.py         # エピソードの記録と保存（11 章。#14）
   │   ├── tasks.py          # VLM の応答 → タスクの列（6.3）
   │   ├── occlusion.py      # 撮影位置の計算、深度による隠れの判定（7.2）
   │   ├── navigation.py     # 格子地図、A*、止め位置、経路追従の速度指令（8）
@@ -201,6 +203,8 @@ stateDiagram-v2
       ├── base.py           # 台車の速度指令（BaseDriver）
       ├── arm.py            # cuMotion（#3 の ArmPlanning の移植）
       ├── manipulation.py   # 掴む・置く（PickPlaceController の分割移植）
+      ├── robot.py          # RidgebackFranka の定数と USD の探索（#13）
+      ├── robot_adapter.py  # Robot の Protocol の実装（掴んだ物体の記憶、撮影姿勢への移動。#14）
       └── recorder.py       # 撮影用のカメラと連番画像
   scripts/run_episode.py    # 1 エピソードを実行（--milestone m1|m2、--seed、--record）
   scripts/run_eval.py       # 評価（複数シードの実行と集計）
@@ -626,7 +630,8 @@ class PathFollower:
   | 姿勢 | 関節の値 | 使う場面 |
   |---|---|---|
   | 待機（standby） | #3 の値（台車座標で手先 (0.4, 0, 0.95)、真下向き） | 移動中、物体を持って運ぶとき |
-  | 畳んだ姿勢（folded） | Franka の既定姿勢 | 写真を撮るとき（前方への張り出しは撮影位置の計算に入れる） |
+  | 畳んだ姿勢（folded） | Franka の既定姿勢 | （撮影姿勢のもと） |
+  | 撮影姿勢（photo） | 畳んだ姿勢の第 1 関節を -2.85rad（台車の後ろ向き）に回す。関節の目標をなめらかに補間して動かす | 写真を撮るとき。天井カメラから見てアームが台車の上に収まり、M1 の止め位置（机から 10cm）のままでも天板を隠さない（#14 で撮り直し 0 回を確認） |
 
 - **根拠**：[3_arm_motion.md](experiments/3_arm_motion.md)、[10_occlusion.md](experiments/10_occlusion.md)（既定姿勢は台車の前面より 15cm 前に出る）
 
