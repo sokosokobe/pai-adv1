@@ -24,6 +24,25 @@ class RobotGeometry:
         """家具の正面に止めたときの、台車の中心から家具の縁までの距離。"""
         return self.half_length + self.furniture_gap
 
+    @property
+    def circumradius(self) -> float:
+        """台車を上から見た外接円の半径（向きによらず当たらない範囲）。"""
+        return math.hypot(self.half_length, self.half_width)
+
+
+@dataclass(frozen=True)
+class NavConfig:
+    """移動層（設計書 8 章）。"""
+
+    resolution: float = 0.05  # 格子地図の 1 マス [m]
+    inflation_margin: float = 0.10  # 障害物を「台車の外接円の半径 ＋ これ」だけ膨らませる
+    min_gap: float = 0.05  # まっすぐ下がる・寄せる区間で、台車の外形と家具・壁の間に空ける距離
+    max_backoff: float = 0.6  # 膨張の外に出るまでまっすぐ下がる距離の上限
+    backoff_step: float = 0.02
+    lateral_step: float = 0.05  # 止め位置を横にずらす刻み
+    max_lateral_shift: float = 0.40  # 止め位置を横にずらす最大の量
+    shoot_retreat: float = 0.20  # 写真でロボットが天板を隠したとき、まっすぐ下がる距離
+
 
 @dataclass(frozen=True)
 class ReachConfig:
@@ -52,6 +71,7 @@ class ScatterConfig:
 ROBOT = RobotGeometry()
 REACH = ReachConfig()
 SCATTER = ScatterConfig()
+NAV = NavConfig()
 
 PLACE_MARGIN = 0.02  # 物体の外形と天板の縁の余白 [m]
 # 作業範囲の奥行き：家具の正面に止めた台車から楽に届く、手前の縁からの距離（0.85 − 0.57 = 0.28m）
