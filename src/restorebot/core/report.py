@@ -31,6 +31,7 @@ class TaskRecord:
     error_m: float | None = None  # 置いた後の物体と置く位置の水平距離（真値）
     started_s: float = 0.0  # シミュレーションの時刻
     duration_s: float = 0.0
+    round: int = 1  # 1：最初の片付け、2：確認の後のやり直し（設計書 10 章）
 
 
 def detection_to_dict(detection) -> dict:
@@ -58,6 +59,7 @@ class EpisodeLog:
     instructions: list[dict] = field(default_factory=list)
     dropped: list[str] = field(default_factory=list)
     tasks: list[TaskRecord] = field(default_factory=list)
+    verify: dict | None = None  # 確認（片付けた後の写真と VLM）：detection・instructions・dropped
     status: str = "running"  # succeeded・partial・failed
     reason: str | None = None
     sim_time_s: float = 0.0
@@ -74,14 +76,22 @@ class EpisodeLog:
             "status": self.status,
             "reason": self.reason,
             "sim_time_s": self.sim_time_s,
-            "cost_usd": None if self.detection is None else self.detection.get("cost_usd"),
+            "cost_usd": self.cost_usd,
             "events": self.events,
             "detection": self.detection,
             "instructions": self.instructions,
             "dropped": self.dropped,
             "tasks": [dataclasses.asdict(t) for t in self.tasks],
+            "verify": self.verify,
             "photos": sorted(self.photos),
         }
+
+    @property
+    def cost_usd(self) -> float | None:
+        """VLM の料金の合計（最初の比較と確認）。分からないものがあれば None。"""
+        detections = [d for d in (self.detection, (self.verify or {}).get("detection")) if d is not None]
+        costs = [d.get("cost_usd") for d in detections]
+        return None if not costs or any(c is None for c in costs) else sum(costs)
 
     def save(self, out_dir: Path) -> Path:
         """log.json と写真（<名前>_rgb.png・<名前>_depth.npy）を out_dir に保存する。"""

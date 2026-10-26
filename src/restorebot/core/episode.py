@@ -42,6 +42,7 @@ class EpisodeConfig:
     max_retakes: int = 2
     max_grasp_retries: int = 1
     vlm_retries: int = 2
+    verify: bool = False  # 片付けた後の確認と、残った物体の 1 回のやり直し（設計書 10 章）
     action_timeout_s: float = 60.0  # 1 つの動作（掴む・置く・姿勢の変更）の時間切れ（シミュレーションの時間）
     dt: float = 1.0 / 60.0  # Action.step に渡す時間（物理の 1 ステップ）
 
@@ -215,6 +216,50 @@ class Episode:
             self._arm_to("standby")
         return rec
 
+    def _run_tasks(self, tasks, base, *, round_: int) -> None:
+        for task in tasks:
+            rec = self._do_task(task, base)
+            rec.round = round_
+            state = self.world.object_state(task.key)
+            rec.final_position = tuple(state.position)
+            rec.error_m = math.dist(state.position[:2], task.place_position[:2])
+            rec.duration_s = self.t - rec.started_s
+            self.log.tasks.append(rec)
+            self.log.event(self.t, "task", rec.reason or "", key=rec.key, status=rec.status, round=round_)
+
+    def _detect(self, current: Observation):
+        cam = self.scene.camera
+        return detect_moves(
+            self.vlm,
+            encode_png(self.reference.rgb),
+            encode_png(current.rgb),
+            object_names=[o.name for o in self.scene.objects],
+            width=cam.width,
+            height=cam.height,
+            retries=self.config.vlm_retries,
+        )
+
+    def _verify_and_retry(self, after: Observation, base) -> None:
+        log = self.log
+        detection = self._detect(after)
+        log.verify = {"detection": detection_to_dict(detection), "instructions": [], "dropped": []}
+        if not detection.ok:
+            log.event(self.t, "verify_failed", "確認の VLM の問い合わせに失敗。1 回目の結果で終える")
+            return
+        instructions, dropped = to_instructions(detection.moves, self.scene, self.reference, self.scene.camera)
+        log.verify["instructions"] = [
+            {"key": i.key, "target_position": list(i.target_position), "target_surface": i.target_surface}
+            for i in instructions
+        ]
+        log.verify["dropped"] = dropped
+        keys = [i.key for i in instructions]
+        log.event(self.t, "verify", "残りなし" if not keys else "やり直す：" + "・".join(keys), remaining=keys)
+        if not instructions:
+            return
+        tasks = plan_tasks(instructions, self.world, self.scene, self.world.robot_pose())
+        self._run_tasks(tasks, base, round_=2)
+        log.photos["final"] = self._capture_current()
+
     def run(self) -> EpisodeLog:
         """状態遷移を最後まで進め、記録を返す。"""
         if self.reference is None:
@@ -254,24 +299,25 @@ class Episode:
         tasks = plan_tasks(instructions, self.world, self.scene, base)
         log.event(self.t, "plan", " → ".join(t.key for t in tasks))
 
-        for task in tasks:
-            rec = self._do_task(task, base)
-            state = self.world.object_state(task.key)
-            rec.final_position = tuple(state.position)
-            rec.error_m = math.dist(state.position[:2], task.place_position[:2])
-            rec.duration_s = self.t - rec.started_s
-            log.tasks.append(rec)
-            log.event(self.t, "task", rec.reason or "", key=rec.key, status=rec.status)
+        self._run_tasks(tasks, base, round_=1)
 
-        self._arm_to("photo")
-        log.photos["after"] = self.camera.capture()
+        if self.config.verify:
+            # 確認：片付けた後の写真をいつもの写真と比べ、まだ動いている物体だけを 1 回やり直す（設計書 10 章）
+            after = self._capture_current()
+            log.photos["after"] = after
+            self._verify_and_retry(after, base)
+        else:
+            self._arm_to("photo")
+            log.photos["after"] = self.camera.capture()
         self._arm_to("standby")
 
-        succeeded = sum(t.status == "succeeded" for t in log.tasks)
-        if succeeded == len(log.tasks):
+        # 成否は物体ごとの最後の結果で決める（1 回目に失敗しても、やり直しで戻せれば成功）
+        last = {t.key: t for t in log.tasks}
+        succeeded = sum(t.status == "succeeded" for t in last.values())
+        if succeeded == len(last):
             log.finish("succeeded")
         elif succeeded > 0:
-            log.finish("partial", f"{len(log.tasks) - succeeded} 個のタスクが失敗")
+            log.finish("partial", f"{len(last) - succeeded} 個のタスクが失敗")
         else:
             log.finish("failed", "すべてのタスクが失敗")
         log.sim_time_s = self.t
