@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from restorebot.core.config import NAV, ROBOT
 from restorebot.core.navigation import approach_pose, build_grid, in_reach, plan_route, retreat_pose
 from restorebot.core.occlusion import needs_retake, robot_mask
+from restorebot.core.perception import EstimatedWorld
 from restorebot.core.report import EpisodeLog, TaskRecord, detection_to_dict
 from restorebot.core.scene import SceneSpec
 from restorebot.core.tasks import plan_tasks, to_instructions
@@ -47,6 +48,9 @@ class EpisodeConfig:
     dt: float = 1.0 / 60.0  # Action.step に渡す時間（物理の 1 ステップ）
 
 
+UNKNOWN_POSITION = "物体の位置が分からない（天板の上にない、または画像から推定できない）"
+
+
 def encode_png(rgb) -> bytes:
     from PIL import Image
 
@@ -67,11 +71,18 @@ class Episode:
         config: EpisodeConfig | None = None,
         *,
         meta: dict | None = None,
+        truth: WorldState | None = None,
     ) -> None:
+        """world はロボットを動かすための世界（真値、または推定版の EstimatedWorld）。
+
+        truth は記録（置いた後の位置、推定の誤差）のための真値。省略すると world を使う。
+        """
         if (config or EpisodeConfig()).milestone not in ("m1", "m2"):
             raise ValueError(f"未知の milestone です: {config.milestone}")
         self.scene = scene
         self.world = world
+        self.truth = truth or world
+        self.estimated = isinstance(world, EstimatedWorld)
         self.camera = camera
         self.robot = robot
         self.vlm = vlm
@@ -162,6 +173,9 @@ class Episode:
         for _ in range(self.config.max_grasp_retries + 1):
             self._arm_to("standby")
             obj = self.world.object_state(task.key)  # 掴み損ねて物体が動いたかもしれないので、毎回取り直す
+            if obj.surface is None:
+                rec.status, rec.reason = "skipped", UNKNOWN_POSITION
+                return rec
             reason = self._go_to(obj.position[:2], obj.surface)
             if reason is not None:
                 rec.status, rec.reason = "skipped", reason
@@ -193,6 +207,9 @@ class Episode:
             return self._do_task_m2(task)
         rec = TaskRecord(task.key, tuple(task.place_position), tuple(task.pick.position), started_s=self.t)
         pick_xy, place_xy = task.pick.position[:2], task.place_position[:2]
+        if task.pick.surface is None:
+            rec.status, rec.reason = "skipped", UNKNOWN_POSITION
+            return rec
         if not (in_reach(base, pick_xy) and in_reach(base, place_xy)):
             rec.status, rec.reason = "skipped", "M1 の止め位置から届かない"
             return rec
@@ -216,11 +233,26 @@ class Episode:
             self._arm_to("standby")
         return rec
 
+    def _estimate_errors(self, task) -> tuple[float | None, float | None]:
+        """推定版の世界のとき、掴む物体の推定（task.pick）と真値の差（位置 [m]、箱の向き [deg]、180° の範囲）。"""
+        if not self.estimated or task.pick.surface is None:
+            return None, None
+        t = self.truth.object_state(task.key)
+        pos = math.dist(task.pick.position[:2], t.position[:2])
+        if self.scene.object(task.key).shape != "cube":
+            return pos, None
+        d = (task.pick.yaw - t.yaw) % math.pi
+        return pos, math.degrees(min(d, math.pi - d))
+
     def _run_tasks(self, tasks, base, *, round_: int) -> None:
         for task in tasks:
+            est_err, yaw_err = self._estimate_errors(task)
             rec = self._do_task(task, base)
             rec.round = round_
-            state = self.world.object_state(task.key)
+            rec.estimate_error_m, rec.estimate_yaw_error_deg = est_err, yaw_err
+            if self.estimated and rec.status == "succeeded":  # 置いた物体は、置いた位置にあるとみなす
+                self.world.note_placed(task.key, task.place_position, task.place_yaw)
+            state = self.truth.object_state(task.key)
             rec.final_position = tuple(state.position)
             rec.error_m = math.dist(state.position[:2], task.place_position[:2])
             rec.duration_s = self.t - rec.started_s
@@ -239,6 +271,17 @@ class Episode:
             retries=self.config.vlm_retries,
         )
 
+    def _perceive(self, obs: Observation, moves) -> None:
+        """推定版の世界のとき、VLM が答えた物体の位置・向きを今の写真から推定し直す（#23）。"""
+        if not self.estimated:
+            return
+        failed = self.world.update(obs, moves)
+        estimates = {
+            k: {"position": list(e.position), "yaw": e.yaw, "n_pixels": e.n_pixels}
+            for k, e in self.world.estimates.items()
+        }
+        self.log.event(self.t, "perception", f"{len(failed)} 個の推定に失敗", failed=failed, estimates=estimates)
+
     def _verify_and_retry(self, after: Observation, base) -> None:
         log = self.log
         detection = self._detect(after)
@@ -246,6 +289,7 @@ class Episode:
         if not detection.ok:
             log.event(self.t, "verify_failed", "確認の VLM の問い合わせに失敗。1 回目の結果で終える")
             return
+        self._perceive(after, detection.moves)
         instructions, dropped = to_instructions(detection.moves, self.scene, self.reference, self.scene.camera)
         log.verify["instructions"] = [
             {"key": i.key, "target_position": list(i.target_position), "target_surface": i.target_surface}
@@ -289,6 +333,7 @@ class Episode:
             self._arm_to("standby")
             log.sim_time_s = self.t
             return log
+        self._perceive(current, detection.moves)
 
         instructions, dropped = to_instructions(detection.moves, self.scene, self.reference, cam)
         log.instructions = [

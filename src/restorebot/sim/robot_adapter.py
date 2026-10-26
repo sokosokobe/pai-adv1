@@ -14,7 +14,7 @@ import numpy as np
 
 from restorebot.core.grasp import footprints
 from restorebot.core.scene import SceneSpec
-from restorebot.core.types import ObjectState, Pose2D, Status, StepResult
+from restorebot.core.types import ObjectState, Pose2D, Status, StepResult, WorldState
 from restorebot.sim import robot as rb
 from restorebot.sim.base import NavigateAction
 from restorebot.sim.manipulation import ArmContext, pick_action, place_action, standby_action
@@ -83,7 +83,14 @@ class _OnSuccess:
 class SimRobot:
     """Robot の実装。台車の移動は sim.base.NavigateAction（M2）。"""
 
-    def __init__(self, scene: SceneSpec, sim: SimScene, world: SimWorld, ctx: ArmContext) -> None:
+    def __init__(
+        self, scene: SceneSpec, sim: SimScene, world: SimWorld, ctx: ArmContext, *, objects: WorldState | None = None
+    ) -> None:
+        """objects は隣の物体の位置を取る世界（推定版の EstimatedWorld など）。省略すると world（真値）。
+
+        world（真値）は、台車の位置（オドメトリに相当）と、掴めたかどうかの判定（物体の高さ）に使う。
+        """
+        self.objects = objects or world
         self.scene = scene
         self.sim = sim
         self.world = world
@@ -92,7 +99,7 @@ class SimRobot:
         self._hand_yaw: float | None = None
 
     def _neighbors(self, key: str):
-        positions = {k: self.world.object_pose(k)[0] for k in self.scene.tidy if k != key}
+        positions = {k: self.objects.object_state(k).position for k in self.scene.tidy if k != key}
         return footprints(self.scene, positions, key)
 
     def navigate(self, path: list[Pose2D]):

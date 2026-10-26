@@ -32,6 +32,9 @@ class TaskRecord:
     started_s: float = 0.0  # シミュレーションの時刻
     duration_s: float = 0.0
     round: int = 1  # 1：最初の片付け、2：確認の後のやり直し（設計書 10 章）
+    # 画像から推定した物体の位置・向きと真値の差（推定版の世界のときだけ。向きは箱だけ、180° の範囲。#23）
+    estimate_error_m: float | None = None
+    estimate_yaw_error_deg: float | None = None
 
 
 def detection_to_dict(detection) -> dict:

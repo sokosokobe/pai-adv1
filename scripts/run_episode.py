@@ -30,6 +30,7 @@ from pathlib import Path
 
 from restorebot.core.config import M1_BASE_POSE, M2_START_POSE
 from restorebot.core.navigation import robot_clearance
+from restorebot.core.perception import EstimatedWorld
 from restorebot.core.scene import HOME_V2, generate_scenario
 from restorebot.core.types import Pose2D
 from restorebot.sim.app import start_app
@@ -61,6 +62,12 @@ def main() -> int:
     ap.add_argument("--milestone", choices=["m1", "m2"], default="m1")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--vlm", choices=["truth", "claude"], default="truth")
+    ap.add_argument(
+        "--perception",
+        choices=["truth", "estimated"],
+        default="truth",
+        help="掴む物体の位置・向き：シミュレータの真値か、今の写真と VLM の答えから推定するか",
+    )
     ap.add_argument("--record", action="store_true", help="撮影用のカメラの動画を作る")
     ap.add_argument("--keep-frames", action="store_true", help="動画にした後も連番画像を残す")
     ap.add_argument("--gui", action="store_true")
@@ -110,7 +117,9 @@ def main() -> int:
             simulation_app.update()
         start = {k: world.object_pose(k)[0] for k in SCENE.tidy}
         ctx = ArmContext(ArmPlanning(sim.robot))
-        robot = SimRobot(SCENE, sim, world, ctx)
+        # 物体の位置・向き：真値か、今の写真と VLM の答えから推定するか（#23）。台車の位置はどちらも関節の値
+        perceived = EstimatedWorld(SCENE, world) if args.perception == "estimated" else world
+        robot = SimRobot(SCENE, sim, world, ctx, objects=perceived)
 
         if args.vlm == "truth":  # 問い合わせのたびに、その時点の真値から答える（確認でも使える）
             vlm = TruthVlmClient(SCENE, lambda: {k: tuple(world.object_pose(k)[0]) for k in SCENE.tidy})
@@ -146,13 +155,19 @@ def main() -> int:
 
         episode = Episode(
             SCENE,
-            world,
+            perceived,
             camera,
             robot,
             vlm,
             Stepper(),
             EpisodeConfig(milestone=args.milestone, verify=not args.no_verify),
-            meta={"seed": args.seed, "vlm": vlm.name, "moved_truth": list(scenario.moved)},
+            meta={
+                "seed": args.seed,
+                "vlm": vlm.name,
+                "perception": args.perception,
+                "moved_truth": list(scenario.moved),
+            },
+            truth=world,
         )
         episode.reference = reference
         log = episode.run()
