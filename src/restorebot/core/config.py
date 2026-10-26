@@ -18,6 +18,11 @@ class RobotGeometry:
     half_length: float = 0.47  # 前後の半分（#2 の実測 0.466m）
     half_width: float = 0.40  # 左右の半分（#10 の深度からの実測 0.39m）
     furniture_gap: float = 0.10  # 台車の前面と家具の縁の隙間（#3：机は台車の前面から 10cm 程度に寄せる）
+    # 天井カメラから見た台車の上面（#26 の深度からの実測：高さ 0.26〜0.28m、外接する長方形 0.927 × 0.788m）
+    top_z_min: float = 0.24
+    top_z_max: float = 0.31
+    top_length: float = 0.93
+    top_width: float = 0.79
 
     @property
     def center_to_edge(self) -> float:

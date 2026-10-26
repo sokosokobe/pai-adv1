@@ -6,6 +6,13 @@ estimate_object：
        （隣に同じ高さの物体があっても混ざらない。散らかし方の隙間 5cm は机の上で約 19px）
     3. 位置：塊の画素を上面の高さで逆投影した点の重心（VLM の点が数 px ずれても補正される）
     4. 向き：箱だけ。塊の長い方向を主成分分析で求める（180° の違いは区別しない）。円柱は推定しない
+estimate_robot_pose（#26）：今の写真から台車の位置と向きを推定する（オドメトリとの差を確かめるため）
+    1. いつもの写真（ロボットなし）より手前にある画素のうち、台車の上面の高さにある画素の、いちばん大きな塊
+       （アームの像が上面を横切って分かれた塊も、台車の大きさの範囲にあればまとめる。離れた雑音は除く）
+    2. 塊の凸包に、面積が最小の長方形を当てはめる（回転キャリパー法）。撮影姿勢のアームは上面の内側を隠すだけなので、
+       凸包は台車の外形のまま（重心と主成分分析では、アームに隠された分だけ位置が 3cm・向きが 40° ずれた）
+    3. 長方形の中心が位置、長い辺の方向が向き。前後は対称なので、180° の違いはオドメトリの向きに近い方
+    4. 長方形の大きさが台車の上面と合わなければ（家具に隠れた・写真の外にはみ出た）推定できないとする
 EstimatedWorld：WorldState の推定版。台車の位置はオドメトリ（台車の関節の値）をそのまま使う。
 """
 
@@ -19,6 +26,9 @@ from dataclasses import dataclass
 import numpy as np
 
 from restorebot.core.camera import DownCamera
+from restorebot.core.config import RobotGeometry
+from restorebot.core.navigation import wrap_angle
+from restorebot.core.occlusion import robot_mask
 from restorebot.core.scene import SceneSpec
 from restorebot.core.types import ObjectState, Observation, Pose2D, WorldState
 from restorebot.core.vlm.parse import PredictedMove, normalize_name
@@ -103,6 +113,148 @@ def estimate_object(
             yaw += math.pi / 2
         yaw = (yaw + math.pi / 2) % math.pi - math.pi / 2
     return Estimate(key, (cx, cy, surface.z + spec.height / 2), yaw, surface.key, len(pixels))
+
+
+@dataclass(frozen=True)
+class RobotPoseEstimate:
+    pose: Pose2D | None  # 推定できなければ None
+    size: tuple[float, float] | None  # 当てはめた長方形の (長い辺, 短い辺) [m]
+    n_pixels: int  # 上面の塊の画素の数
+    reason: str | None = None  # 推定できなかった理由
+
+
+def _components(mask: np.ndarray) -> list[np.ndarray]:
+    """mask の塊（8 近傍でつながった画素）。それぞれ (行, 列) の配列。大きい順。"""
+    seen = np.zeros_like(mask)
+    h, w = mask.shape
+    blobs = []
+    for seed in zip(*np.nonzero(mask), strict=True):
+        if seen[seed]:
+            continue
+        seen[seed] = True
+        queue, pixels = deque([seed]), []
+        while queue:
+            a, b = queue.popleft()
+            pixels.append((a, b))
+            for na in (a - 1, a, a + 1):
+                for nb in (b - 1, b, b + 1):
+                    if 0 <= na < h and 0 <= nb < w and mask[na, nb] and not seen[na, nb]:
+                        seen[na, nb] = True
+                        queue.append((na, nb))
+        blobs.append(np.asarray(pixels))
+    return sorted(blobs, key=len, reverse=True)
+
+
+def _robot_blob(mask: np.ndarray, radius_px: float, min_part: int = 50) -> np.ndarray:
+    """台車の上面の画素：いちばん大きな塊と、その重心から radius_px 以内に重心がある塊（min_part 画素以上）。
+
+    アームの像が上面を横切ると、上面が 2 つの塊に分かれることがある（視差で、写真の中心から離れるほど像がずれる）。
+    """
+    blobs = _components(mask)
+    out = np.zeros_like(mask)
+    if not blobs:
+        return out
+    center = blobs[0].mean(axis=0)
+    for blob in blobs:
+        if blob is blobs[0] or (len(blob) >= min_part and np.hypot(*(blob.mean(axis=0) - center)) <= radius_px):
+            out[blob[:, 0], blob[:, 1]] = True
+    return out
+
+
+def _convex_hull(points: np.ndarray) -> np.ndarray:
+    """2 次元の点の凸包の頂点（反時計回り。Andrew の単調連鎖法）。"""
+    pts = sorted({(float(x), float(y)) for x, y in points})
+    if len(pts) < 3:
+        return np.asarray(pts, dtype=float)
+
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    lower: list[tuple[float, float]] = []
+    upper: list[tuple[float, float]] = []
+    for p in pts:
+        while len(lower) >= 2 and cross(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    for p in reversed(pts):
+        while len(upper) >= 2 and cross(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    return np.asarray(lower[:-1] + upper[:-1], dtype=float)
+
+
+def min_area_rect(points: np.ndarray) -> tuple[tuple[float, float], float, tuple[float, float]]:
+    """点を囲む面積が最小の長方形：(中心, 長い辺の向き [rad]（-π/2〜π/2）, (長い辺, 短い辺))。"""
+    hull = _convex_hull(points)
+    best = None
+    for i in range(len(hull)):
+        e = hull[(i + 1) % len(hull)] - hull[i]
+        a = math.atan2(e[1], e[0])
+        c, s = math.cos(a), math.sin(a)
+        q = hull @ np.array([[c, -s], [s, c]])  # 辺の方向を軸にした座標
+        lo, hi = q.min(axis=0), q.max(axis=0)
+        area = float(np.prod(hi - lo))
+        if best is None or area < best[0]:
+            best = (area, a, (lo + hi) / 2, hi - lo)
+    _, a, mid, (sa, sb) = best
+    c, s = math.cos(a), math.sin(a)
+    center = (float(mid[0] * c - mid[1] * s), float(mid[0] * s + mid[1] * c))
+    if sb > sa:  # 長い辺の向きにそろえる
+        a, sa, sb = a + math.pi / 2, sb, sa
+    a = (a + math.pi / 2) % math.pi - math.pi / 2
+    return center, a, (float(sa), float(sb))
+
+
+def estimate_robot_pose(
+    obs: Observation,
+    reference_depth: np.ndarray,
+    odometry: Pose2D,
+    camera: DownCamera,
+    geometry: RobotGeometry | None = None,
+    *,
+    size_tol: float = 0.05,
+    min_pixels: int = 2000,
+) -> RobotPoseEstimate:
+    """今の写真から台車の位置と向きを推定する。180° の違いはオドメトリ odometry の向きに近い方を選ぶ。"""
+    g = geometry or RobotGeometry()
+    z = camera.position[2] - obs.depth
+    mask = robot_mask(obs.depth, reference_depth) & (z >= g.top_z_min) & (z <= g.top_z_max)
+    if not mask.any():
+        return RobotPoseEstimate(None, None, 0, "台車の上面の高さの画素がない")
+    # 塊をまとめる範囲：台車の外接円の半径（上面の高さで画素に直す）
+    radius_px = g.circumradius * camera.fx / (camera.position[2] - (g.top_z_min + g.top_z_max) / 2)
+    blob = _robot_blob(mask, radius_px)
+    n = int(blob.sum())
+    if n < min_pixels:
+        return RobotPoseEstimate(None, None, n, f"台車の上面の画素が少ない（{n} 画素）")
+    # 塊の外形：行ごと・列ごとの端の画素の 4 隅（画素の中心は +0.5。端の画素の外側の縁まで含める）
+    rows, cols = np.nonzero(blob)
+    edge = []
+    for idx, other in ((rows, cols), (cols, rows)):
+        order = np.lexsort((other, idx))
+        a, b = idx[order], other[order]
+        first = np.r_[True, a[1:] != a[:-1]]
+        last = np.r_[a[1:] != a[:-1], True]
+        sel = first | last
+        pairs = np.stack([b[sel], a[sel]], axis=1) if idx is rows else np.stack([a[sel], b[sel]], axis=1)
+        edge.append(pairs)  # (列, 行)
+    px = np.unique(np.concatenate(edge), axis=0).astype(float)
+    corners = np.concatenate([px + np.array([du, dv]) for du in (0.0, 1.0) for dv in (0.0, 1.0)])
+    # 上面は水平なので、画素の座標から上面の高さの平面へ逆投影する（深度は塊の中央値）
+    d = float(np.median(obs.depth[blob]))
+    xy = np.stack(
+        [
+            camera.position[0] + (corners[:, 0] - camera.cx) * d / camera.fx,
+            camera.position[1] - (corners[:, 1] - camera.cy) * d / camera.fy,
+        ],
+        axis=1,
+    )
+    (cx, cy), axis, size = min_area_rect(xy)
+    if abs(size[0] - g.top_length) > size_tol or abs(size[1] - g.top_width) > size_tol:
+        reason = f"長方形の大きさ {size[0]:.2f} × {size[1]:.2f}m が台車の上面と合わない（隠れている・写真の外）"
+        return RobotPoseEstimate(None, size, n, reason)
+    yaw = axis if abs(wrap_angle(axis - odometry.yaw)) <= math.pi / 2 else wrap_angle(axis + math.pi)
+    return RobotPoseEstimate(Pose2D(cx, cy, yaw), size, n)
 
 
 class EstimatedWorld:
