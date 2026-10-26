@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import math
 import sys
@@ -56,6 +57,29 @@ class PerturbPlaceRobot:
 
     def __getattr__(self, name):
         return getattr(self.robot, name)
+
+
+class PerturbPickRobot:
+    """Robot の包み：物体 key の最初の 1 回だけ、掴む位置を offset ずらす（わざと掴み損ねる。#27）。"""
+
+    def __init__(self, robot, key: str, offset: tuple[float, float, float]) -> None:
+        self.robot, self.key, self.offset, self.used = robot, key, offset, False
+
+    def pick(self, obj):
+        if obj.key == self.key and not self.used:
+            self.used = True
+            obj = dataclasses.replace(
+                obj, position=tuple(p + d for p, d in zip(obj.position, self.offset, strict=True))
+            )
+        return self.robot.pick(obj)
+
+    def __getattr__(self, name):
+        return getattr(self.robot, name)
+
+
+def _grip_summary(checks: list[dict]) -> str:
+    """指の開きによる判定と真値による判定の一致の数（例 "7/7"）。"""
+    return f"{sum(c['grip_ok'] == c['truth_ok'] for c in checks)}/{len(checks)}"
 
 
 def _pose_summary(checks: list[dict]) -> list:
@@ -98,6 +122,9 @@ def main() -> int:
     ap.add_argument("--no-verify", action="store_true", help="片付けた後の確認とやり直しをしない")
     ap.add_argument(
         "--perturb-place", default=None, metavar="KEY:DX:DY", help="物体 KEY の 1 回目の置く位置を (DX, DY) [m] ずらす"
+    )
+    ap.add_argument(
+        "--perturb-pick", default=None, metavar="KEY:DX:DY", help="物体 KEY の 1 回目の掴む位置を (DX, DY) [m] ずらす"
     )
     ap.add_argument(
         "--report", action="store_true", help="報告の画面（report.html）を作る。--vlm claude なら報告文も Claude が書く"
@@ -146,7 +173,7 @@ def main() -> int:
         ctx = ArmContext(ArmPlanning(sim.robot))
         # 物体の位置・向き：真値か、今の写真と VLM の答えから推定するか（#23）。台車の位置はどちらも関節の値
         perceived = EstimatedWorld(SCENE, world) if args.perception == "estimated" else world
-        robot = SimRobot(SCENE, sim, world, ctx, objects=perceived)
+        sim_robot = robot = SimRobot(SCENE, sim, world, ctx, objects=perceived)
 
         if args.vlm == "replay":  # 過去の実行の VLM の応答を順に再生する（同じ条件で再現するため）
             past = json.loads(args.replay_log.read_text(encoding="utf-8"))
@@ -157,6 +184,10 @@ def main() -> int:
             vlm = TruthVlmClient(SCENE, lambda: {k: tuple(world.object_pose(k)[0]) for k in SCENE.tidy})
         else:
             vlm = make_client(args.vlm)
+        if args.perturb_pick:  # わざと掴み損ねる：指定の物体の 1 回目の掴む位置だけをずらす（指の開きの判定の確認用）
+            key, dx, dy = args.perturb_pick.split(":")
+            robot = PerturbPickRobot(robot, key, (float(dx), float(dy), 0.0))
+            result["perturb_pick"] = [key, float(dx), float(dy)]
         if args.perturb_place:  # わざと戻し損ねる：指定の物体の 1 回目の置く位置だけをずらす（確認とやり直しの確認用）
             key, dx, dy = args.perturb_place.split(":")
             robot = PerturbPlaceRobot(robot, key, (float(dx), float(dy), 0.0))
@@ -234,6 +265,8 @@ def main() -> int:
                 "home_yaw_err_deg": yaw_errors,
                 "untouched_moved_m": untouched,
                 "robot_pose_checks": pose_checks,
+                # 掴めたか・まだ持っているかの、指の開きによる判定と真値による判定（#27）
+                "grip_checks": sim_robot.grip_checks,
                 "min_clearance_m": track["min_clearance"],
                 "min_clearance_at": track["at"],
                 "trajectory": track["trajectory"],
@@ -261,6 +294,7 @@ def main() -> int:
             f"err_mm={ {k: round(v * 1000, 1) for k, v in result.get('home_err_m', {}).items()} } "
             f"yaw_err_deg={ {k: round(v, 1) for k, v in result.get('home_yaw_err_deg', {}).items()} } "
             f"robot_pose_cm_deg={_pose_summary(result.get('robot_pose_checks', []))} "
+            f"grip_agree={_grip_summary(result.get('grip_checks', []))} "
             f"sim={result.get('sim_time_s', 0):.1f}s wall={result['wall_s']:.0f}s -> {out}",
             flush=True,
         )

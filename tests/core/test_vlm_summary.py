@@ -92,6 +92,11 @@ def test_reason_category():
     assert reason_category("skipped", "止め位置がない（届かない）") == "近づけなかった"
     assert reason_category("failed", "スタック（3 秒進まない。(0.10, 0.20) 付近）") == "運べなかった"
     assert reason_category("failed", "place が 7.0 秒で時間切れ") == "置けなかった"
+    # 指の開きで落としたと分かった（#27）：置く前でも、持ち上げた後でも
+    assert reason_category("failed", "approach：落とした：指が閉じきった（開き 0.1cm。何も挟んでいない）") == "落とした"
+    assert reason_category("skipped", "standby：落とした：指が閉じきった（開き 0.1cm）") == "落とした"
+    assert reason_category("skipped", "lift：掴めていない：指が閉じきった（開き 0.0cm）") == "掴めなかった"
+    assert reason_category("skipped", "掴み損ね（指が閉じきった（開き 0.0cm。何も挟んでいない））") == "掴めなかった"
 
 
 def test_facts_use_final_result_per_object_in_task_order():

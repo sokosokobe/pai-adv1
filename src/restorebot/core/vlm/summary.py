@@ -42,6 +42,8 @@ def reason_category(status: str, reason: str | None) -> str:
     text = reason or ""
     if "位置が分からない" in text:
         return "場所が分からなかった"
+    if "落とした" in text:  # 指の開きで、持ち上げた後・運ぶ途中に落としたと分かった（#27）
+        return "落とした"
     if status == "failed":  # 掴んだ後の失敗：運ぶ途中か、置くとき
         return "運べなかった" if any(w in text for w in _NEAR_WORDS) else "置けなかった"
     if any(w in text for w in _NEAR_WORDS):

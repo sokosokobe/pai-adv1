@@ -24,12 +24,14 @@ from restorebot.core.grasp import (
     FingerSettle,
     Footprint,
     GraspParams,
+    GripMonitor,
     Gripper,
     Stage,
     StageSequencer,
     bearing_yaw,
     choose_grasp_yaw,
     hand_down_quat_wxyz,
+    judge_grip,
     move_toward,
     pick_stages,
     place_stages,
@@ -90,7 +92,12 @@ class StagedAction:
         *,
         obstacle_prim: str | None = None,
         on_finish: Callable[[Status], StepResult] | None = None,
+        grip_width: float | None = None,
+        on_end: Callable[[StepResult], None] | None = None,
     ) -> None:
+        """grip_width：持っている物体の掴む幅。与えると、物を持って動く段階（指を閉じたまま動く段階）で指の開きを監視し、
+        落としたら失敗にする（#27）。on_end：終わったときに最後の結果を受け取る（記録用）。
+        """
         self.name = name
         self.ctx = ctx
         self.seq = StageSequencer(stages, ctx.params)
@@ -105,6 +112,9 @@ class StagedAction:
         self._cmd_stage = -1  # 手先の目標を少しずつ動かしている段階
         self._cmd_pos: tuple[float, float, float] | None = None
         self._settle = FingerSettle((rb.FINGER_OPEN, rb.FINGER_OPEN))
+        self.on_end = on_end
+        self.grip_opening: float | None = None  # 最後に測った指の開き（左右の指の関節の値の和）[m]
+        self._grip = None if grip_width is None else GripMonitor(grip_width, ctx.params)
 
     def start(self) -> None:
         self.t = 0.0
@@ -143,10 +153,16 @@ class StagedAction:
         state = planning.robot_state()
         target_pos, target_q = self._hand_target(stage)
         hand_pos, hand_q = planning.tool_pose()
+        fingers = _finger_positions(state)
+        self.grip_opening = sum(fingers)
+        if self._grip is not None and stage.gripper is Gripper.CLOSE and not stage.wait_gripper:
+            dropped = self._grip.update(self.t, self.grip_opening)  # 物を持って動く段階：落としていないか
+            if dropped is not None:
+                return self._finish(Status.FAILED, f"{stage.name}：{dropped}")
         gripper_done = gripper.is_complete(state)
         if stage.gripper is Gripper.CLOSE:
             # 物を挟んで止まった指は速度の値が振れるので、位置が止まったことでも閉じ終わりとみなす（#25）
-            gripper_done = self._settle.update(self.t, _finger_positions(state)) or gripper_done
+            gripper_done = self._settle.update(self.t, fingers) or gripper_done
         status = self.seq.update(
             self.t,
             float(np.linalg.norm(hand_pos - np.asarray(target_pos))),
@@ -172,7 +188,11 @@ class StagedAction:
         if status is Status.FAILED:
             self._set_obstacle(True)  # 失敗したら障害物に戻す
         result = StepResult(status, reason)
-        return self.on_finish(result.status) if self.on_finish and status is Status.SUCCEEDED else result
+        if self.on_finish and status is Status.SUCCEEDED:
+            result = self.on_finish(result.status)
+        if self.on_end is not None:
+            self.on_end(result)
+        return result
 
 
 def _finger_positions(state) -> tuple[float, ...]:
@@ -189,23 +209,47 @@ def pick_action(
     object_z: Callable[[], float],
     obstacle_prim: str,
     neighbors: Sequence[Footprint] = (),
+    record: Callable[[dict], None] | None = None,
 ) -> StagedAction:
-    """物体 obj を掴んで持ち上げ、待機姿勢へ。最後に物体が LIFT_MIN 以上持ち上がっていなければ失敗（掴み損ね）。
+    """物体 obj を掴んで持ち上げ、待機姿勢へ。
 
+    掴めたかどうかは、ロボット自身の指の開きで判定する（judge_grip。#27）。持ち上げ・待機姿勢へ動く間も監視し、
+    落としたら失敗。真値（物体の高さ object_z が LIFT_MIN 以上上がったか）は、判定の比較のために record に渡すだけ。
     手先の向きは、台車から物体を見た方向を基準に、隣の物体 neighbors に手が当たらない向きを選ぶ（choose_grasp_yaw）。
     """
+    spec = scene.object(obj.key)
     xy = obj.position[:2]
-    yaw = choose_grasp_yaw(scene.object(obj.key).shape, obj.yaw, bearing_yaw(base, xy), xy, neighbors, ctx.params)
+    yaw = choose_grasp_yaw(spec.shape, obj.yaw, bearing_yaw(base, xy), xy, neighbors, ctx.params)
     z0 = obj.position[2]
+    width = spec.grasp_width
 
     def check(_: Status) -> StepResult:
-        lift = object_z() - z0
-        if lift < LIFT_MIN:
-            return StepResult(Status.FAILED, f"掴み損ね（持ち上がった高さ {lift:.3f}m）")
+        reason = judge_grip(action.grip_opening, width, ctx.params)
+        if reason is not None:
+            return StepResult(Status.FAILED, f"掴み損ね（{reason}）")
         return StepResult(Status.SUCCEEDED)
 
+    def end(result: StepResult) -> None:
+        if record is None:
+            return
+        lift = float(object_z() - z0)  # 真値の世界では z0 が numpy の値（記録は JSON にするので Python の型にする）
+        record(
+            {
+                "phase": "pick",
+                "key": obj.key,
+                "opening_m": action.grip_opening,
+                "grip_ok": result.status is Status.SUCCEEDED,
+                "reason": result.reason,
+                "truth_lift_m": lift,
+                "truth_ok": bool(lift >= LIFT_MIN),
+            }
+        )
+
     stages = pick_stages(obj.position, yaw, base, ctx.params)
-    return StagedAction(f"pick:{obj.key}", ctx, stages, obstacle_prim=obstacle_prim, on_finish=check)
+    action = StagedAction(
+        f"pick:{obj.key}", ctx, stages, obstacle_prim=obstacle_prim, on_finish=check, grip_width=width, on_end=end
+    )
+    return action
 
 
 def place_action(
@@ -216,8 +260,11 @@ def place_action(
     base: Pose2D,
     obstacle_prim: str,
     neighbors: Sequence[Footprint] = (),
+    grip_width: float | None = None,
 ) -> StagedAction:
     """掴んでいる物体を position（置いたときの物体の中心）に置き、待機姿勢へ。
+
+    grip_width（物体の掴む幅）を与えると、指を開くまでの間に指の開きを監視し、運ぶ途中で落としていたら失敗（#27）。
 
     物体の向きは変えない（設計書 18 章 Q3）。箱は掴んだときの手先の向き hand_yaw か、それを 180° 回した向き
     （箱の形は同じ）のうち、台車から置く位置を見た方向に近い方。円柱は軸のまわりに回しても見た目が変わらないので、
@@ -226,7 +273,8 @@ def place_action(
     xy = position[:2]
     yaw = choose_grasp_yaw(shape, hand_yaw, bearing_yaw(base, xy), xy, neighbors, ctx.params)
     stages = place_stages(position, yaw, base, ctx.params)
-    return StagedAction(f"place:{obstacle_prim.rsplit('/', 1)[-1]}", ctx, stages, obstacle_prim=obstacle_prim)
+    name = f"place:{obstacle_prim.rsplit('/', 1)[-1]}"
+    return StagedAction(name, ctx, stages, obstacle_prim=obstacle_prim, grip_width=grip_width)
 
 
 def standby_action(ctx: ArmContext, base: Pose2D, gripper: Gripper = Gripper.OPEN) -> StagedAction:

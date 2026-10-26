@@ -45,6 +45,10 @@ FRAME_EVERY = 15  # 連番画像：4Hz
 NEIGHBOR_TOL = 0.01  # 隣の物体が動いてよい量 [m]
 
 
+def _all_results(summary: dict) -> list[dict]:
+    return summary["trials"] + [r for sc in summary["scenarios"] for r in sc["results"]]
+
+
 def park_placement(i: int) -> Placement:
     """使わない物体を置いておく場所（床の上、ロボットと家具から離れた所。天板の上には置かない）。"""
     return Placement("floor", -0.4 + 0.25 * i, -1.25, 0.0)
@@ -170,6 +174,8 @@ def main() -> int:
             state = world.object_state(key)
             p0 = np.asarray(state.position)
             rec = {"moved_before_grasp": None, "max_lift": 0.0, "lifted": False, "dropped": False}
+            carry_openings: list[float] = []  # 物を持って動く段階の指の開き（指の開きの判定のしきい値の確認。#27）
+            grip_checks: list[dict] = []
             counter = {"i": 0}
             tilts: list[tuple[str, float, float]] = []  # (動作:段階, 時刻, 物体の傾き [deg])。段階が変わるたびに記録
             trace: list[list] = []  # [動作:段階, 時刻, 物体 x, y, z, 手先 x, y, z]（5 ステップごと）
@@ -200,6 +206,8 @@ def main() -> int:
                     carrying = stage in ("lift", "standby") if action.name.startswith("pick") else stage == "approach"
                     if rec["lifted"] and carrying and lift < 0.01:
                         rec["dropped"] = True
+                    if carrying and action.grip_opening is not None:
+                        carry_openings.append(action.grip_opening)
                     if frames_dir is not None and counter["i"] % FRAME_EVERY == 0:
                         save_frame(frames_dir, counter["i"])
 
@@ -208,7 +216,14 @@ def main() -> int:
             t0 = time.perf_counter()
             neighbors = footprints(SCENE, others0, key)
             pick = pick_action(
-                ctx, SCENE, state, BASE, lambda: float(world.object_pose(key)[0][2]), object_path(key), neighbors
+                ctx,
+                SCENE,
+                state,
+                BASE,
+                lambda: float(world.object_pose(key)[0][2]),
+                object_path(key),
+                neighbors,
+                record=grip_checks.append,
             )
             r_pick = run_action(simulation_app, pick, PHYSICS_DT, on_step=monitor(pick))
             out = {
@@ -221,7 +236,10 @@ def main() -> int:
             place = None
             if r_pick.status is Status.SUCCEEDED:
                 shape = SCENE.object(key).shape
-                place = place_action(ctx, shape, target_center, pick.hand_yaw, BASE, object_path(key), neighbors)
+                width = SCENE.object(key).grasp_width
+                place = place_action(
+                    ctx, shape, target_center, pick.hand_yaw, BASE, object_path(key), neighbors, grip_width=width
+                )
                 r_place = run_action(simulation_app, place, PHYSICS_DT, on_step=monitor(place))
                 out["place"] = {"status": r_place.status.value, "reason": r_place.reason, "stages": place.log}
                 out["place"]["t"] = place.t
@@ -231,6 +249,13 @@ def main() -> int:
             p1, q1 = world.object_pose(key)
             out["tilts"] = tilts + [("settled", 0.0, round(tilt_deg_from_quat_wxyz(q1), 1))]
             out["trace"] = trace
+            # 指の開きによる判定（掴めたか）と、真値による判定（持ち上がったか）。運ぶ間の指の開きの範囲（#27）
+            out["grip"] = {
+                "pick": grip_checks[0] if grip_checks else None,
+                "agree": all(c["grip_ok"] == c["truth_ok"] for c in grip_checks),
+                "grasp_width_m": SCENE.object(key).grasp_width,
+                "carry_opening_m": [min(carry_openings), max(carry_openings)] if carry_openings else None,
+            }
             o = TrialObservation(
                 controller_done=place is not None and out["place"]["status"] == "succeeded",
                 moved_before_grasp_m=rec["moved_before_grasp"] or 0.0,
@@ -316,6 +341,9 @@ def main() -> int:
             "place_err_max_mm": max((t["observation"]["place_xy_err_m"] * 1000 for t in trials), default=None),
             "scenarios_ok": sum(s["ok"] for s in summary["scenarios"]),
             "scenarios": len(summary["scenarios"]),
+            # 指の開きによる判定と真値による判定が一致した試行の数（散らかし方の試行を含む。#27）
+            "grip_agree": sum(r["grip"]["agree"] for r in _all_results(summary)),
+            "grip_trials": len(_all_results(summary)),
         }
         summary["status"] = "ok"
         exit_code = 0
