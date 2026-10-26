@@ -17,9 +17,9 @@ import math
 from dataclasses import dataclass
 
 from restorebot.core.config import NAV, ROBOT
-from restorebot.core.navigation import approach_pose, build_grid, in_reach, plan_route, retreat_pose
+from restorebot.core.navigation import approach_pose, build_grid, in_reach, plan_route, retreat_pose, wrap_angle
 from restorebot.core.occlusion import needs_retake, robot_mask
-from restorebot.core.perception import EstimatedWorld
+from restorebot.core.perception import EstimatedWorld, estimate_robot_pose
 from restorebot.core.report import EpisodeLog, TaskRecord, detection_to_dict
 from restorebot.core.scene import SceneSpec
 from restorebot.core.tasks import plan_tasks, to_instructions
@@ -46,6 +46,11 @@ class EpisodeConfig:
     verify: bool = False  # 片付けた後の確認と、残った物体の 1 回のやり直し（設計書 10 章）
     action_timeout_s: float = 60.0  # 1 つの動作（掴む・置く・姿勢の変更）の時間切れ（シミュレーションの時間）
     dt: float = 1.0 / 60.0  # Action.step に渡す時間（物理の 1 ステップ）
+    # 撮影姿勢の写真から台車の位置を推定し、オドメトリと比べる（#26）。
+    # off・record（記録だけ）・warn（差が robot_pose_warn_m・robot_pose_warn_deg を超えたら警告）
+    robot_pose_check: str = "record"
+    robot_pose_warn_m: float = 0.05
+    robot_pose_warn_deg: float = 3.0
 
 
 UNKNOWN_POSITION = "物体の位置が分からない（天板の上にない、または画像から推定できない）"
@@ -154,6 +159,44 @@ class Episode:
             else:
                 self.log.event(self.t, "still_hidden", f"{cfg.max_retakes} 回撮り直しても隠れている。この写真で進める")
         return obs
+
+    def _keep_photo(self, name: str, obs: Observation) -> None:
+        """撮影姿勢で撮った写真を記録に残し、写真から推定した台車の位置とオドメトリの差を記録する（#26）。"""
+        self.log.photos[name] = obs
+        cfg = self.config
+        if cfg.robot_pose_check == "off":
+            return
+        odom = self.world.robot_pose()
+        est = estimate_robot_pose(obs, self.reference.depth, odom, self.scene.camera, ROBOT)
+        data = {
+            "photo": name,
+            "odometry": [odom.x, odom.y, odom.yaw],
+            "n_pixels": est.n_pixels,
+            "size": None if est.size is None else [round(v, 4) for v in est.size],
+        }
+        if est.pose is None:
+            self.log.event(self.t, "robot_pose", est.reason or "", estimate=None, **data)
+            return
+        diff_m = math.hypot(est.pose.x - odom.x, est.pose.y - odom.y)
+        diff_deg = math.degrees(wrap_angle(est.pose.yaw - odom.yaw))
+        self.log.event(
+            self.t,
+            "robot_pose",
+            f"写真から推定した台車の位置とオドメトリの差 {diff_m * 100:.1f}cm・{diff_deg:.1f}°",
+            estimate=[est.pose.x, est.pose.y, est.pose.yaw],
+            diff_m=diff_m,
+            diff_deg=diff_deg,
+            **data,
+        )
+        if cfg.robot_pose_check == "warn" and (
+            diff_m > cfg.robot_pose_warn_m or abs(diff_deg) > cfg.robot_pose_warn_deg
+        ):
+            self.log.event(
+                self.t,
+                "robot_pose_warning",
+                f"オドメトリが写真とずれている（{diff_m * 100:.1f}cm・{diff_deg:.1f}°）",
+                photo=name,
+            )
 
     def _go_to(self, xy, surface: str | None) -> str | None:
         """M2：家具 surface の上の点 xy を掴む・置くための止め位置へ移動する。失敗の理由を返す（成功なら None）。
@@ -308,7 +351,7 @@ class Episode:
             return
         tasks = plan_tasks(instructions, self.world, self.scene, self.world.robot_pose())
         self._run_tasks(tasks, base, round_=2)
-        log.photos["final"] = self._capture_current()
+        self._keep_photo("final", self._capture_current())
 
     def run(self) -> EpisodeLog:
         """状態遷移を最後まで進め、記録を返す。"""
@@ -321,7 +364,7 @@ class Episode:
         log.event(self.t, "start")
 
         current = self._capture_current()
-        log.photos["current"] = current
+        self._keep_photo("current", current)
         cam = self.scene.camera
         detection = detect_moves(
             self.vlm,
@@ -352,11 +395,11 @@ class Episode:
         if self.config.verify:
             # 確認：片付けた後の写真をいつもの写真と比べ、まだ動いている物体だけを 1 回やり直す（設計書 10 章）
             after = self._capture_current()
-            log.photos["after"] = after
+            self._keep_photo("after", after)
             self._verify_and_retry(after, base)
         else:
             self._arm_to("photo")
-            log.photos["after"] = self.camera.capture()
+            self._keep_photo("after", self.camera.capture())
         self._arm_to("standby")
 
         # 成否は物体ごとの最後の結果で決める（1 回目に失敗しても、やり直しで戻せれば成功）

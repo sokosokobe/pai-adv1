@@ -58,6 +58,11 @@ class PerturbPlaceRobot:
         return getattr(self.robot, name)
 
 
+def _pose_summary(checks: list[dict]) -> list:
+    """写真ごとの「台車の位置の推定とオドメトリの差」(cm, °) の短い表示。推定できなかった写真は None。"""
+    return [None if c.get("diff_m") is None else (round(c["diff_m"] * 100, 1), round(c["diff_deg"], 2)) for c in checks]
+
+
 def _report(out: Path, vlm: str) -> None:
     """報告の画面を作る（失敗しても実行の結果は変えない）。"""
     try:
@@ -214,6 +219,12 @@ def main() -> int:
             if SCENE.object(k).shape == "cube":
                 d = (world.object_state(k).yaw - SCENE.tidy[k].yaw) % math.pi
                 yaw_errors[k] = math.degrees(min(d, math.pi - d))
+        # 写真から推定した台車の位置とオドメトリ（台車の関節の値）の差（#26）
+        pose_checks = [
+            {k: e.get(k) for k in ("photo", "estimate", "odometry", "diff_m", "diff_deg", "size", "message")}
+            for e in log.events
+            if e["kind"] == "robot_pose"
+        ]
         result.update(
             {
                 "status": log.status,
@@ -222,6 +233,7 @@ def main() -> int:
                 "all_returned": all(e <= SUCCESS_TOL for e in errors.values()),
                 "home_yaw_err_deg": yaw_errors,
                 "untouched_moved_m": untouched,
+                "robot_pose_checks": pose_checks,
                 "min_clearance_m": track["min_clearance"],
                 "min_clearance_at": track["at"],
                 "trajectory": track["trajectory"],
@@ -248,6 +260,7 @@ def main() -> int:
             f"all_returned={result.get('all_returned')} "
             f"err_mm={ {k: round(v * 1000, 1) for k, v in result.get('home_err_m', {}).items()} } "
             f"yaw_err_deg={ {k: round(v, 1) for k, v in result.get('home_yaw_err_deg', {}).items()} } "
+            f"robot_pose_cm_deg={_pose_summary(result.get('robot_pose_checks', []))} "
             f"sim={result.get('sim_time_s', 0):.1f}s wall={result['wall_s']:.0f}s -> {out}",
             flush=True,
         )
