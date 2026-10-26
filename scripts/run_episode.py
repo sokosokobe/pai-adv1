@@ -40,6 +40,22 @@ PARKED = Pose2D(6.0, 0.0, 0.0)  # いつもの写真を撮るときのロボッ�
 SUCCESS_TOL = 0.03  # 成功の基準：戻し先から水平 3cm 以内（設計書 13 章）
 
 
+class PerturbPlaceRobot:
+    """Robot の包み：物体 key の最初の 1 回だけ、置く位置を offset ずらす（わざと戻し損ねる。#19）。"""
+
+    def __init__(self, robot, key: str, offset: tuple[float, float, float]) -> None:
+        self.robot, self.key, self.offset, self.used = robot, key, offset, False
+
+    def place(self, position, yaw):
+        if self.robot.holding() == self.key and not self.used:
+            self.used = True
+            position = tuple(p + d for p, d in zip(position, self.offset, strict=True))
+        return self.robot.place(position, yaw)
+
+    def __getattr__(self, name):
+        return getattr(self.robot, name)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--milestone", choices=["m1", "m2"], default="m1")
@@ -48,6 +64,10 @@ def main() -> int:
     ap.add_argument("--record", action="store_true", help="撮影用のカメラの動画を作る")
     ap.add_argument("--keep-frames", action="store_true", help="動画にした後も連番画像を残す")
     ap.add_argument("--gui", action="store_true")
+    ap.add_argument("--no-verify", action="store_true", help="片付けた後の確認とやり直しをしない")
+    ap.add_argument(
+        "--perturb-place", default=None, metavar="KEY:DX:DY", help="物体 KEY の 1 回目の置く位置を (DX, DY) [m] ずらす"
+    )
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -60,7 +80,7 @@ def main() -> int:
     t_wall = time.perf_counter()
     try:
         from restorebot.core.episode import Episode, EpisodeConfig
-        from restorebot.core.vlm.client import DummyVlmClient, make_client, truth_response
+        from restorebot.core.vlm.client import TruthVlmClient, make_client
         from restorebot.sim import robot as rb
         from restorebot.sim.arm import ArmPlanning
         from restorebot.sim.manipulation import ArmContext
@@ -92,12 +112,14 @@ def main() -> int:
         ctx = ArmContext(ArmPlanning(sim.robot))
         robot = SimRobot(SCENE, sim, world, ctx)
 
-        if args.vlm == "truth":
-            current = {k: tuple(start[k]) for k in scenario.moved}
-            target = {k: SCENE.object_center(k, SCENE.tidy[k]) for k in scenario.moved}
-            vlm = DummyVlmClient(truth_response(SCENE, current, target), name="truth")
+        if args.vlm == "truth":  # 問い合わせのたびに、その時点の真値から答える（確認でも使える）
+            vlm = TruthVlmClient(SCENE, lambda: {k: tuple(world.object_pose(k)[0]) for k in SCENE.tidy})
         else:
             vlm = make_client(args.vlm)
+        if args.perturb_place:  # わざと戻し損ねる：指定の物体の 1 回目の置く位置だけをずらす（確認とやり直しの確認用）
+            key, dx, dy = args.perturb_place.split(":")
+            robot = PerturbPlaceRobot(robot, key, (float(dx), float(dy), 0.0))
+            result["perturb_place"] = [key, float(dx), float(dy)]
 
         recorder = None
         if args.record:
@@ -129,7 +151,7 @@ def main() -> int:
             robot,
             vlm,
             Stepper(),
-            EpisodeConfig(milestone=args.milestone),
+            EpisodeConfig(milestone=args.milestone, verify=not args.no_verify),
             meta={"seed": args.seed, "vlm": vlm.name, "moved_truth": list(scenario.moved)},
         )
         episode.reference = reference

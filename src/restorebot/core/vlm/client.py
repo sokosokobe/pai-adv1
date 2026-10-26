@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import os
 import time
 from collections.abc import Sequence
@@ -237,6 +238,29 @@ def truth_response(scene, current: dict, target: dict) -> str:
             }
         )
     return json.dumps({"moved_objects": moves}, ensure_ascii=False)
+
+
+class TruthVlmClient:
+    """問い合わせのたびに、その時点の真値から応答を作る VLM（API を呼ばずにエピソードを試すため）。
+
+    positions() は物体の key → 今の中心のワールド座標。いつもの位置から水平に min_offset [m] 以上離れた物体を
+    「動いた」と答える（片付けた後の確認でも、その時点の状態を答える。#19）。scene は SceneSpec。
+    """
+
+    coord_format = "pixel_xy"
+
+    def __init__(self, scene, positions, *, min_offset: float = 0.02, name: str = "truth") -> None:
+        self.scene = scene
+        self.positions = positions
+        self.min_offset = min_offset
+        self.name = name
+
+    def detect(self, before_png: bytes, after_png: bytes, prompt: str) -> VlmResult:
+        now = self.positions()
+        home = {k: self.scene.object_center(k, p) for k, p in self.scene.tidy.items()}
+        moved = [k for k in home if math.dist(now[k][:2], home[k][:2]) >= self.min_offset]
+        text = truth_response(self.scene, {k: now[k] for k in moved}, {k: home[k] for k in moved})
+        return VlmResult(text=text, input_tokens=0, output_tokens=0, latency_s=0.0, model=self.name, cost_usd=0.0)
 
 
 def make_client(key: str) -> VlmClient:
