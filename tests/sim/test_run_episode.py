@@ -17,11 +17,12 @@ TIMEOUT_S = 900
 
 
 @pytest.mark.isaac
-@pytest.mark.parametrize("milestone", ["m1", "m2"])
-def test_episode_with_truth_vlm(tmp_path, milestone):
+@pytest.mark.parametrize(("milestone", "perception"), [("m1", "truth"), ("m2", "truth"), ("m2", "estimated")])
+def test_episode_with_truth_vlm(tmp_path, milestone, perception):
     env = {**os.environ, "OMNI_KIT_ACCEPT_EULA": "YES"}
+    args = ["--milestone", milestone, "--perception", perception, "--seed", "1", "--out", str(tmp_path)]
     proc = subprocess.run(
-        [sys.executable, str(SCRIPT), "--milestone", milestone, "--seed", "1", "--out", str(tmp_path)],
+        [sys.executable, str(SCRIPT), *args],
         cwd=REPO_ROOT,
         env=env,
         capture_output=True,
