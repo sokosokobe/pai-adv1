@@ -157,9 +157,31 @@ def set_robot_pose(simulation_app, sim: SimScene, base: Pose2D, arm: tuple[float
     q[base_idx] = (base.x, base.y, base.yaw)
     q[sim.dof_indices(rb.ARM_JOINTS)] = arm
     q[sim.dof_indices(rb.FINGER_JOINTS)] = rb.FINGER_OPEN
-    art.switch_dof_control_mode("position", dof_indices=base_idx)
     art.set_dof_positions(q)
     art.set_dof_velocities(np.zeros_like(q))
     art.set_dof_position_targets(q)
+    hold_base(sim, (base.x, base.y, base.yaw))
     for _ in range(steps):
         simulation_app.update()
+
+
+def hold_base(sim: SimScene, pose: tuple[float, float, float]) -> None:
+    """台車の関節を位置制御にして pose (x, y, yaw) で止める。x・y は BASE_HOLD_DRIVE の硬いドライブで保持する。"""
+    art = sim.robot
+    idx = sim.dof_indices(rb.BASE_JOINTS)
+    art.switch_dof_control_mode("position", dof_indices=idx)
+    k, d, f = rb.BASE_HOLD_DRIVE
+    xy = idx[:2]
+    # 既定のゲイン（移動中の速度制御で使う）は変えない
+    art.set_dof_gains(stiffnesses=[k, k], dampings=[d, d], dof_indices=xy, update_default_gains=False)
+    art.set_dof_max_efforts([f, f], dof_indices=xy)
+    art.set_dof_position_targets([list(pose)], dof_indices=idx)
+
+
+def release_base(sim: SimScene) -> None:
+    """台車の関節を速度制御にする（ゲイン・最大力はアセットのまま）。"""
+    art = sim.robot
+    idx = sim.dof_indices(rb.BASE_JOINTS)
+    art.switch_dof_control_mode("velocity", dof_indices=idx)
+    f = rb.BASE_DRIVE_MAX_EFFORT
+    art.set_dof_max_efforts([f, f], dof_indices=idx[:2])

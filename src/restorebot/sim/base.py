@@ -13,7 +13,7 @@ from collections.abc import Sequence
 from restorebot.core.navigation import PathFollower, wrap_angle
 from restorebot.core.types import Pose2D, Status, StepResult
 from restorebot.sim import robot as rb
-from restorebot.sim.scene_builder import SimScene
+from restorebot.sim.scene_builder import SimScene, hold_base, release_base
 from restorebot.sim.world import SimWorld
 
 
@@ -40,7 +40,7 @@ class NavigateAction:
     def start(self) -> None:
         self.t = 0.0
         self.follower = PathFollower(self.path)
-        self.sim.robot.switch_dof_control_mode("velocity", dof_indices=self.idx)
+        release_base(self.sim)
         self._ref = self.world.robot_pose()
         self._ref_t = 0.0
 
@@ -49,8 +49,7 @@ class NavigateAction:
         art = self.sim.robot
         art.set_dof_velocity_targets([[0.0, 0.0, 0.0]], dof_indices=self.idx)
         q = art.get_dof_positions().numpy()[0]
-        art.switch_dof_control_mode("position", dof_indices=self.idx)
-        art.set_dof_position_targets([[float(q[i]) for i in self.idx]], dof_indices=self.idx)
+        hold_base(self.sim, tuple(float(q[i]) for i in self.idx))
 
     def step(self, dt: float) -> StepResult:
         self.t += dt

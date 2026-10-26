@@ -102,6 +102,18 @@ def grasp_yaw(shape: str, object_yaw: float, reference_yaw: float) -> float:
     raise ValueError(f"上から掴めない形です: {shape}")
 
 
+def box_place_hand_yaw(
+    grasp_hand_yaw: float, grasp_object_yaw: float, target_object_yaw: float, reference_yaw: float
+) -> float:
+    """箱を置くときの手先の向き（#25）：物体を target_object_yaw の向きにして置く。
+
+    物体は手と一緒に回るので、手先を「掴んだときの手先の向き ＋（目標の向き − 掴んだときの物体の向き）」にする。
+    箱は 180° 回しても同じ形なので、180° 違う 2 通りのうち reference_yaw（台車から置く位置を見た方向）に近い方。
+    """
+    axis = grasp_hand_yaw + wrap_angle(target_object_yaw - grasp_object_yaw)
+    return grasp_yaw("cube", axis, reference_yaw)
+
+
 def bearing_yaw(base: Pose2D, xy: Sequence[float]) -> float:
     """台車の中心から点 xy を見た方向 [rad]。"""
     return math.atan2(xy[1] - base.y, xy[0] - base.x)
@@ -187,6 +199,39 @@ def standby_grasp_position(base: Pose2D) -> tuple[float, float, float]:
     return (base.x + c * hx - s * hy, base.y + s * hx + c * hy, hz - GRASP_OFFSET_Z)
 
 
+class FingerSettle:
+    """閉じる指が物を挟んで止まったかを、関節の位置の変化だけで判定する。
+
+    #25：物を挟んで止まった指の関節の速度の値は ±0.2m/s ほど振れ続けることがあり（位置は 0.1mm も動いていない）、
+    速度で判定する JointGripperController の「途中で止まった」判定が成り立たず、閉じる段階が時間切れになった。
+    どの指も開いた位置から min_close 以上閉じ、window 秒のあいだ位置の変化が tol 以内なら止まったとみなす。
+    """
+
+    def __init__(
+        self, open_positions: Sequence[float], window: float = 0.2, tol: float = 5e-4, min_close: float = 0.002
+    ) -> None:
+        self.open_positions = tuple(open_positions)
+        self.window, self.tol, self.min_close = window, tol, min_close
+        self._history: list[tuple[float, tuple[float, ...]]] = []
+
+    def reset(self) -> None:
+        self._history = []
+
+    def update(self, t: float, positions: Sequence[float]) -> bool:
+        positions = tuple(positions)
+        self._history.append((t, positions))
+        while len(self._history) > 1 and t - self._history[1][0] >= self.window:
+            self._history.pop(0)  # window より古い記録は、window ちょうど前の 1 個を残して捨てる
+        if t - self._history[0][0] < self.window - 1e-9:
+            return False
+        closed = all(o - p >= self.min_close for o, p in zip(self.open_positions, positions, strict=True))
+        still = all(
+            max(h[1][j] for h in self._history) - min(h[1][j] for h in self._history) <= self.tol
+            for j in range(len(positions))
+        )
+        return closed and still
+
+
 def move_toward(current: Sequence[float], target: Sequence[float], max_dist: float) -> tuple[float, float, float]:
     """current から target へ、最大 max_dist だけ近づいた点（手先の目標を少しずつ動かして速さを抑えるため）。"""
     d = [t - c for c, t in zip(current, target, strict=True)]
@@ -213,9 +258,25 @@ def pick_stages(center: Sequence[float], yaw: float, base: Pose2D, params: Grasp
         Stage("approach", _above(p, params.approach_height), yaw, Gripper.OPEN, False, True, t["approach"]),
         Stage("descend", p, yaw, Gripper.OPEN, False, False, t["descend"]),
         Stage("grasp", p, yaw, Gripper.CLOSE, True, False, t["grasp"]),
-        Stage("lift", _above(p, params.lift_height), yaw, Gripper.CLOSE, False, False, t["lift"], max_speed=v),
         Stage(
-            "standby", standby_grasp_position(base), base.yaw, Gripper.CLOSE, False, False, t["standby"], max_speed=v
+            "lift",
+            _above(p, params.lift_height),
+            yaw,
+            Gripper.CLOSE,
+            False,
+            False,
+            t["lift"],
+            max_speed=v,
+        ),
+        Stage(
+            "standby",
+            standby_grasp_position(base),
+            base.yaw,
+            Gripper.CLOSE,
+            False,
+            False,
+            t["standby"],
+            max_speed=v,
         ),
     ]
 

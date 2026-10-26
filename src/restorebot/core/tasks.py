@@ -8,6 +8,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from restorebot.core.camera import DownCamera
+from restorebot.core.perception import estimate_object
 from restorebot.core.scene import SceneSpec
 from restorebot.core.types import MoveInstruction, Observation, Pose2D, TidyTask, WorldState
 from restorebot.core.vlm.parse import PredictedMove, normalize_name
@@ -73,6 +74,10 @@ def to_instructions(
         if not surface.in_work_area((x, y), spec.footprint_radius):
             dropped.append(f"{p.name}: 戻し先 ({x:.3f}, {y:.3f}) が {surface.key} の作業範囲の外")
             continue
+        target_yaw = None
+        if spec.shape == "cube":  # 箱は、いつもの写真から戻し先の向きを求める（#25。推定できなければ None）
+            est = estimate_object(key, p.target_px, reference, scene, camera)
+            target_yaw = None if est is None else est.yaw
         instructions.append(
             MoveInstruction(
                 key=key,
@@ -80,6 +85,7 @@ def to_instructions(
                 target_px=p.target_px,
                 target_position=(x, y, z),
                 target_surface=surface.key,
+                target_yaw=target_yaw,
             )
         )
     return instructions, dropped
@@ -93,7 +99,8 @@ def plan_tasks(
     1 個目は台車の位置 start から、2 個目からは前のタスクで置く位置から、
     掴む物体までの水平距離が最も短いものを選ぶ（設計書では 2 個目からの基準は「前のタスクの止め位置」。
     止め位置の計算は #16 で作るので、それまでは置く位置で代用する）。
-    物体の向きは戻さないので、置くときの向き place_yaw は掴んだときの物体の向きのまま。
+    置いたときの物体の向き place_yaw は、箱で戻し先の向きが分かれば戻し先の向き（いつもの向きに戻す。#25）、
+    円柱や戻し先の向きが分からないときは掴んだときの物体の向きのまま。
     """
     remaining = [(ins, world.object_state(ins.key)) for ins in instructions]
     here = (start.x, start.y)
@@ -106,7 +113,7 @@ def plan_tasks(
                 key=ins.key,
                 pick=state,
                 place_position=ins.target_position,
-                place_yaw=state.yaw,
+                place_yaw=state.yaw if ins.target_yaw is None else ins.target_yaw,
                 place_surface=ins.target_surface,
             )
         )

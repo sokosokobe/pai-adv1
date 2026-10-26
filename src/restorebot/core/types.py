@@ -53,6 +53,8 @@ class MoveInstruction:
     target_px: tuple[float, float]
     target_position: tuple[float, float, float]  # 戻し先（物体の中心）[m]
     target_surface: str
+    # 戻し先の物体の向き [rad]。箱だけ（180° の違いは区別しない）。円柱・推定できないときは None（#25）
+    target_yaw: float | None = None
 
 
 @dataclass(frozen=True)
@@ -62,8 +64,8 @@ class TidyTask:
     key: str
     pick: ObjectState  # 掴む物体（M1〜M2 は真値）
     place_position: tuple[float, float, float]
-    # 置いたときの物体の向き [rad]。物体の向きは戻さないので、掴んだときの物体の向きのまま（設計書 18 章 Q3）。
-    # 手先の向きは、物体の形に合わせて sim の掴む処理が決める
+    # 置いたときの物体の向き [rad]。箱は戻し先の向き（いつもの向きに戻す。#25）、円柱や戻し先の向きが分からない
+    # ときは掴んだときの物体の向きのまま。手先の向きは、物体の形に合わせて sim の掴む・置く処理が決める
     place_yaw: float
     place_surface: str
 

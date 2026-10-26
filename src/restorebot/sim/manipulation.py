@@ -21,6 +21,7 @@ from isaacsim.robot_motion.cumotion import RmpFlowController
 
 from restorebot.core.grasp import (
     GRASP_OFFSET_Z,
+    FingerSettle,
     Footprint,
     GraspParams,
     Gripper,
@@ -103,6 +104,7 @@ class StagedAction:
         self.hand_yaw = stages[0].yaw  # 最初の段階の手先の向き（pick では掴むときの向き。place に渡す）
         self._cmd_stage = -1  # 手先の目標を少しずつ動かしている段階
         self._cmd_pos: tuple[float, float, float] | None = None
+        self._settle = FingerSettle((rb.FINGER_OPEN, rb.FINGER_OPEN))
 
     def start(self) -> None:
         self.t = 0.0
@@ -134,17 +136,22 @@ class StagedAction:
                 state, None, self.t
             ):
                 return self._finish(Status.FAILED, f"{stage.name}：コントローラのリセットに失敗")
+            self._settle.reset()
         stage = self.seq.stage
         gripper = self.ctx.grippers[stage.gripper]
         planning.sync()
         state = planning.robot_state()
         target_pos, target_q = self._hand_target(stage)
         hand_pos, hand_q = planning.tool_pose()
+        gripper_done = gripper.is_complete(state)
+        if stage.gripper is Gripper.CLOSE:
+            # 物を挟んで止まった指は速度の値が振れるので、位置が止まったことでも閉じ終わりとみなす（#25）
+            gripper_done = self._settle.update(self.t, _finger_positions(state)) or gripper_done
         status = self.seq.update(
             self.t,
             float(np.linalg.norm(hand_pos - np.asarray(target_pos))),
             quat_angle_wxyz(hand_q, target_q),
-            gripper.is_complete(state),
+            gripper_done,
         )
         if status is not Status.RUNNING:
             return self._finish(status, self.seq.failure_reason)
@@ -166,6 +173,12 @@ class StagedAction:
             self._set_obstacle(True)  # 失敗したら障害物に戻す
         result = StepResult(status, reason)
         return self.on_finish(result.status) if self.on_finish and status is Status.SUCCEEDED else result
+
+
+def _finger_positions(state) -> tuple[float, ...]:
+    joints = state.joints
+    q = joints.positions.numpy()
+    return tuple(float(q[joints.position_names.index(n)]) for n in rb.FINGER_JOINTS)
 
 
 def pick_action(
