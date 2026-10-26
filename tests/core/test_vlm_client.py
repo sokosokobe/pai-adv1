@@ -137,3 +137,29 @@ def test_dummy_can_return_results_and_raise():
     assert dummy.detect(b"a", b"b", "p").refused
     with pytest.raises(VlmApiError):
         dummy.detect(b"a", b"b", "p")
+
+
+def test_claude_write_sends_text_only_with_low_effort():
+    fake, beta, _ = _fake_anthropic(_resp([_text("報告です。")], inp=2000, out=300))
+    r = ClaudeClient(client=fake).write("REPORT PROMPT")
+    (kw,) = beta.calls
+    assert kw["messages"] == [{"role": "user", "content": "REPORT PROMPT"}]
+    assert kw["output_config"] == {"effort": "low"}  # 構造化出力は使わない
+    assert kw["fallbacks"] == "default"
+    assert r.text == "報告です。" and r.cost_usd == pytest.approx(cost_usd(2000, 300, "claude-sonnet-5-5"))
+
+
+def test_claude_write_wraps_api_error():
+    import anthropic
+
+    error = anthropic.APIConnectionError(request=SimpleNamespace(method="POST", url="x"))
+    fake, _, _ = _fake_anthropic(error=error)
+    with pytest.raises(VlmApiError):
+        ClaudeClient(client=fake).write("P")
+
+
+def test_dummy_write_shares_responses_with_detect():
+    d = DummyVlmClient(["a", "b"])
+    assert d.detect(b"", b"", "P1").text == "a"
+    assert d.write("P2").text == "b"
+    assert d.prompts == ["P1", "P2"]

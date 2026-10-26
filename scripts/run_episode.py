@@ -15,6 +15,7 @@
     reference_* / current_* / after_*   写真（RGB の PNG、深度の npy）
     result.json                   真値での結果（物体ごとの戻し先からの誤差、ほかの物体の動き）
     overview.mp4 / follow.mp4 / ceiling.mp4   動画（--record のとき）
+    report.html / report.json     報告の画面と報告文（--report のとき）
 """
 
 from __future__ import annotations
@@ -57,6 +58,18 @@ class PerturbPlaceRobot:
         return getattr(self.robot, name)
 
 
+def _report(out: Path, vlm: str) -> None:
+    """報告の画面を作る（失敗しても実行の結果は変えない）。"""
+    try:
+        from restorebot.core.report_page import make_report
+        from restorebot.core.vlm.client import make_client
+
+        path, report = make_report(out, SCENE, make_client("claude") if vlm == "claude" else None)
+        print(f"[run_episode] report: {path} ({report.source})", flush=True)
+    except Exception:
+        traceback.print_exc()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--milestone", choices=["m1", "m2"], default="m1")
@@ -80,6 +93,9 @@ def main() -> int:
     ap.add_argument("--no-verify", action="store_true", help="片付けた後の確認とやり直しをしない")
     ap.add_argument(
         "--perturb-place", default=None, metavar="KEY:DX:DY", help="物体 KEY の 1 回目の置く位置を (DX, DY) [m] ずらす"
+    )
+    ap.add_argument(
+        "--report", action="store_true", help="報告の画面（report.html）を作る。--vlm claude なら報告文も Claude が書く"
     )
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
@@ -225,6 +241,8 @@ def main() -> int:
     finally:
         result["wall_s"] = time.perf_counter() - t_wall
         (out / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+        if args.report and (out / "log.json").exists():
+            _report(out, args.vlm)
         print(
             f"[run_episode] seed={args.seed} vlm={args.vlm} status={result.get('status')} "
             f"all_returned={result.get('all_returned')} "

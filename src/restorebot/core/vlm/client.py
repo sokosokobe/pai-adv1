@@ -5,6 +5,8 @@
   （代わりの候補。#12 では動作を確認していない）
 - DummyVlmClient：単体テスト用。決まった応答を順に返す
 
+画像の比較（detect）のほか、Claude とダミーは文章だけの問い合わせ（write。報告文。#24）もできる。
+
 API キーはリポジトリ直下の .env から読み込む（make_client）。単体テストでは実際の API を呼ばない。
 """
 
@@ -94,8 +96,6 @@ class ClaudeClient:
         self._client = client
 
     def detect(self, before_png: bytes, after_png: bytes, prompt: str) -> VlmResult:
-        import anthropic
-
         def image(data: bytes) -> dict:
             b64 = base64.standard_b64encode(data).decode("ascii")
             return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}
@@ -117,6 +117,21 @@ class ClaudeClient:
             ],
             "output_config": {"effort": self.effort, "format": {"type": "json_schema", "schema": RESPONSE_SCHEMA}},
         }
+        return self._create(kwargs)
+
+    def write(self, prompt: str) -> VlmResult:
+        """文章だけを渡して、文章を書かせる（報告文。#24）。構造化出力は使わず、思考は控えめにする。"""
+        kwargs = {
+            "model": self.model,
+            "max_tokens": 4000,
+            "messages": [{"role": "user", "content": prompt}],
+            "output_config": {"effort": "low"},
+        }
+        return self._create(kwargs)
+
+    def _create(self, kwargs: dict) -> VlmResult:
+        import anthropic
+
         t0 = time.perf_counter()
         try:
             if self.fallbacks:
@@ -208,6 +223,12 @@ class DummyVlmClient:
         self.prompts: list[str] = []
 
     def detect(self, before_png: bytes, after_png: bytes, prompt: str) -> VlmResult:
+        return self._next(prompt)
+
+    def write(self, prompt: str) -> VlmResult:
+        return self._next(prompt)
+
+    def _next(self, prompt: str) -> VlmResult:
         item = self.responses[min(len(self.prompts), len(self.responses) - 1)]
         self.prompts.append(prompt)
         if isinstance(item, Exception):
