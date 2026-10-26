@@ -80,3 +80,5 @@ WORK_DEPTH = REACH.max_distance - ROBOT.center_to_edge
 # M1 の止め位置：机（中心 (0.8, 0.85)、奥行き 0.6m）の手前の縁から台車の中心まで 0.57m、机の方（+y）を向く。
 # x = 0.75 は、机の 3 個のいつもの位置が楽に届く範囲に入るように選んだ（設計書 5.2）
 M1_BASE_POSE = Pose2D(0.75, 0.85 - 0.3 - ROBOT.center_to_edge, math.pi / 2)
+# M2 の出発の位置：部屋の南側の空いた所（膨張した障害物の外）。机の方を向く
+M2_START_POSE = Pose2D(0.0, -0.55, math.pi / 2)

@@ -16,6 +16,7 @@ from restorebot.core.grasp import footprints
 from restorebot.core.scene import SceneSpec
 from restorebot.core.types import ObjectState, Pose2D, Status, StepResult
 from restorebot.sim import robot as rb
+from restorebot.sim.base import NavigateAction
 from restorebot.sim.manipulation import ArmContext, pick_action, place_action, standby_action
 from restorebot.sim.scene_builder import SimScene, object_path
 from restorebot.sim.world import SimWorld
@@ -80,7 +81,7 @@ class _OnSuccess:
 
 
 class SimRobot:
-    """M1 用の Robot（台車は動かさない）。"""
+    """Robot の実装。台車の移動は sim.base.NavigateAction（M2）。"""
 
     def __init__(self, scene: SceneSpec, sim: SimScene, world: SimWorld, ctx: ArmContext) -> None:
         self.scene = scene
@@ -95,7 +96,7 @@ class SimRobot:
         return footprints(self.scene, positions, key)
 
     def navigate(self, path: list[Pose2D]):
-        raise NotImplementedError("台車の移動は #17 で作る")
+        return NavigateAction(self.sim, self.world, path)
 
     def pick(self, obj: ObjectState):
         base = self.world.robot_pose()
