@@ -12,7 +12,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from restorebot.core.grasp import footprints
+from restorebot.core.grasp import bearing_yaw, box_place_hand_yaw, footprints
 from restorebot.core.scene import SceneSpec
 from restorebot.core.types import ObjectState, Pose2D, Status, StepResult, WorldState
 from restorebot.sim import robot as rb
@@ -97,6 +97,7 @@ class SimRobot:
         self.ctx = ctx
         self._held: str | None = None
         self._hand_yaw: float | None = None
+        self._object_yaw: float | None = None  # 掴んだときの物体の向き（箱の向きを戻すのに使う。#25）
 
     def _neighbors(self, key: str):
         positions = {k: self.objects.object_state(k).position for k in self.scene.tidy if k != key}
@@ -118,27 +119,29 @@ class SimRobot:
         )
 
         def held():
-            self._held, self._hand_yaw = obj.key, action.hand_yaw
+            self._held, self._hand_yaw, self._object_yaw = obj.key, action.hand_yaw, obj.yaw
 
         return _OnSuccess(action, held)
 
     def place(self, position: tuple[float, float, float], yaw: float):
-        """yaw（物体の向き）は使わない：物体の向きは変えず、手先の向きは掴んだときの向きから決める（設計書 9.2）。"""
+        """物体を position に、向き yaw（置いたときの物体の向き）で置く。
+
+        箱：手先を「掴んだときの手先の向き ＋（yaw − 掴んだときの物体の向き）」に回して置く（#25。
+        180° 違う 2 通りのうち、台車から置く位置を見た方向に近い方）。
+        円柱：yaw は使わず、置く位置の隣の物体を避ける向きを選ぶ（設計書 9.2）。
+        """
         if self._held is None:
             raise RuntimeError("何も掴んでいません")
         key = self._held
-        action = place_action(
-            self.ctx,
-            self.scene.object(key).shape,
-            position,
-            self._hand_yaw,
-            self.world.robot_pose(),
-            object_path(key),
-            self._neighbors(key),
-        )
+        shape = self.scene.object(key).shape
+        base = self.world.robot_pose()
+        hand_yaw = self._hand_yaw
+        if shape == "cube":
+            hand_yaw = box_place_hand_yaw(self._hand_yaw, self._object_yaw, yaw, bearing_yaw(base, position[:2]))
+        action = place_action(self.ctx, shape, position, hand_yaw, base, object_path(key), self._neighbors(key))
 
         def released():
-            self._held = self._hand_yaw = None
+            self._held = self._hand_yaw = self._object_yaw = None
 
         return _OnSuccess(action, released)
 

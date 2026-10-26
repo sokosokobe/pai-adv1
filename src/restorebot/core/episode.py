@@ -51,6 +51,15 @@ class EpisodeConfig:
 UNKNOWN_POSITION = "物体の位置が分からない（天板の上にない、または画像から推定できない）"
 
 
+def _instruction_dict(i) -> dict:
+    return {
+        "key": i.key,
+        "target_position": list(i.target_position),
+        "target_surface": i.target_surface,
+        "target_yaw": i.target_yaw,
+    }
+
+
 def encode_png(rgb) -> bytes:
     from PIL import Image
 
@@ -291,10 +300,7 @@ class Episode:
             return
         self._perceive(after, detection.moves)
         instructions, dropped = to_instructions(detection.moves, self.scene, self.reference, self.scene.camera)
-        log.verify["instructions"] = [
-            {"key": i.key, "target_position": list(i.target_position), "target_surface": i.target_surface}
-            for i in instructions
-        ]
+        log.verify["instructions"] = [_instruction_dict(i) for i in instructions]
         log.verify["dropped"] = dropped
         keys = [i.key for i in instructions]
         log.event(self.t, "verify", "残りなし" if not keys else "やり直す：" + "・".join(keys), remaining=keys)
@@ -336,10 +342,7 @@ class Episode:
         self._perceive(current, detection.moves)
 
         instructions, dropped = to_instructions(detection.moves, self.scene, self.reference, cam)
-        log.instructions = [
-            {"key": i.key, "target_position": list(i.target_position), "target_surface": i.target_surface}
-            for i in instructions
-        ]
+        log.instructions = [_instruction_dict(i) for i in instructions]
         log.dropped = dropped
         tasks = plan_tasks(instructions, self.world, self.scene, base)
         log.event(self.t, "plan", " → ".join(t.key for t in tasks))

@@ -61,7 +61,13 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--milestone", choices=["m1", "m2"], default="m1")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--vlm", choices=["truth", "claude"], default="truth")
+    ap.add_argument("--vlm", choices=["truth", "claude", "replay"], default="truth")
+    ap.add_argument(
+        "--replay-log",
+        type=Path,
+        default=None,
+        help="--vlm replay：応答を再生する過去の実行の log.json（API を呼ばない）",
+    )
     ap.add_argument(
         "--perception",
         choices=["truth", "estimated"],
@@ -87,7 +93,7 @@ def main() -> int:
     t_wall = time.perf_counter()
     try:
         from restorebot.core.episode import Episode, EpisodeConfig
-        from restorebot.core.vlm.client import TruthVlmClient, make_client
+        from restorebot.core.vlm.client import DummyVlmClient, TruthVlmClient, make_client
         from restorebot.sim import robot as rb
         from restorebot.sim.arm import ArmPlanning
         from restorebot.sim.manipulation import ArmContext
@@ -121,7 +127,12 @@ def main() -> int:
         perceived = EstimatedWorld(SCENE, world) if args.perception == "estimated" else world
         robot = SimRobot(SCENE, sim, world, ctx, objects=perceived)
 
-        if args.vlm == "truth":  # 問い合わせのたびに、その時点の真値から答える（確認でも使える）
+        if args.vlm == "replay":  # 過去の実行の VLM の応答を順に再生する（同じ条件で再現するため）
+            past = json.loads(args.replay_log.read_text(encoding="utf-8"))
+            detections = [past["detection"]] + ([past["verify"]["detection"]] if past.get("verify") else [])
+            texts = [a["text"] for d in detections for a in d["attempts"] if a.get("text") is not None]
+            vlm = DummyVlmClient(texts, name=f"replay:{args.replay_log.parent.name}")
+        elif args.vlm == "truth":  # 問い合わせのたびに、その時点の真値から答える（確認でも使える）
             vlm = TruthVlmClient(SCENE, lambda: {k: tuple(world.object_pose(k)[0]) for k in SCENE.tidy})
         else:
             vlm = make_client(args.vlm)
@@ -136,7 +147,7 @@ def main() -> int:
 
             recorder = Recorder(sim, out, world.robot_pose)
 
-        track = {"steps": 0, "min_clearance": float("inf"), "at": None, "trajectory": []}
+        track = {"steps": 0, "min_clearance": float("inf"), "at": None, "trajectory": [], "objects": []}
 
         class Stepper:
             def step(self) -> float:
@@ -147,6 +158,8 @@ def main() -> int:
                     track["min_clearance"], track["at"] = c, [pose.x, pose.y, pose.yaw]
                 if track["steps"] % 6 == 0:
                     track["trajectory"].append([round(pose.x, 4), round(pose.y, 4), round(pose.yaw, 4)])
+                    # 物体の位置（倒した・押したときに、いつ起きたかを調べるため）
+                    track["objects"].append([round(c, 4) for k in SCENE.tidy for c in world.object_pose(k)[0]])
                 track["steps"] += 1
                 simulation_app.update()
                 if recorder is not None:
@@ -179,16 +192,25 @@ def main() -> int:
             k: float(math.hypot(final[k][0] - SCENE.tidy[k].x, final[k][1] - SCENE.tidy[k].y)) for k in scenario.moved
         }
         untouched = {k: float(math.dist(final[k][:2], start[k][:2])) for k in SCENE.tidy if k not in scenario.moved}
+        # 箱の向きの誤差（いつもの向きとの差。180° の違いは同じとみなす。#25）
+        yaw_errors = {}
+        for k in scenario.moved:
+            if SCENE.object(k).shape == "cube":
+                d = (world.object_state(k).yaw - SCENE.tidy[k].yaw) % math.pi
+                yaw_errors[k] = math.degrees(min(d, math.pi - d))
         result.update(
             {
                 "status": log.status,
                 "reason": log.reason,
                 "home_err_m": errors,
                 "all_returned": all(e <= SUCCESS_TOL for e in errors.values()),
+                "home_yaw_err_deg": yaw_errors,
                 "untouched_moved_m": untouched,
                 "min_clearance_m": track["min_clearance"],
                 "min_clearance_at": track["at"],
                 "trajectory": track["trajectory"],
+                "object_keys": list(SCENE.tidy),
+                "object_trajectory": track["objects"],  # 10Hz。物体ごとに x, y, z を object_keys の順に並べた行
                 "sim_time_s": log.sim_time_s,
                 "cost_usd": log.to_dict()["cost_usd"],
             }
@@ -207,6 +229,7 @@ def main() -> int:
             f"[run_episode] seed={args.seed} vlm={args.vlm} status={result.get('status')} "
             f"all_returned={result.get('all_returned')} "
             f"err_mm={ {k: round(v * 1000, 1) for k, v in result.get('home_err_m', {}).items()} } "
+            f"yaw_err_deg={ {k: round(v, 1) for k, v in result.get('home_yaw_err_deg', {}).items()} } "
             f"sim={result.get('sim_time_s', 0):.1f}s wall={result['wall_s']:.0f}s -> {out}",
             flush=True,
         )

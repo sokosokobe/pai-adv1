@@ -165,6 +165,41 @@ def test_carrying_stages_limit_hand_speed():
     assert [s.max_speed for s in place] == [carry, carry, None, None, None, None]
 
 
+def _settle(samples, **kw):
+    from restorebot.core.grasp import FingerSettle
+
+    s = FingerSettle(open_positions=(0.04, 0.04), **kw)
+    return [s.update(t, p) for t, p in samples]
+
+
+def test_finger_settle_after_window():
+    # 物を挟んで止まった指：位置が window のあいだ tol 以内なら止まったとみなす（速度の値は使わない。#25）
+    dt = 1 / 60
+    samples = [(i * dt, (0.0205, 0.016)) for i in range(20)]
+    done = _settle(samples, window=0.2, tol=5e-4, min_close=0.002)
+    assert not any(done[:12])  # 0.2 秒たつまでは判定しない
+    assert done[-1]
+
+
+def test_finger_settle_requires_still_and_closed():
+    dt = 1 / 60
+    moving = [(i * dt, (0.04 - 0.002 * i, 0.04 - 0.002 * i)) for i in range(20)]  # まだ閉じている途中
+    assert not any(_settle(moving, window=0.2, tol=5e-4, min_close=0.002))
+    still_open = [(i * dt, (0.0395, 0.0395)) for i in range(30)]  # 開いたまま止まっている：閉じていない
+    assert not any(_settle(still_open, window=0.2, tol=5e-4, min_close=0.002))
+
+
+def test_finger_settle_reset():
+    from restorebot.core.grasp import FingerSettle
+
+    s = FingerSettle(open_positions=(0.04, 0.04), window=0.2, tol=5e-4, min_close=0.002)
+    for i in range(20):
+        s.update(i / 60, (0.02, 0.02))
+    assert s.update(20 / 60, (0.02, 0.02))
+    s.reset()
+    assert not s.update(21 / 60, (0.02, 0.02))  # リセットしたら、また window 待つ
+
+
 def test_move_toward():
     from restorebot.core.grasp import move_toward
 
