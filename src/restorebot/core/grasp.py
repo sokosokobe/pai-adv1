@@ -68,6 +68,11 @@ class GraspParams:
     hand_half_width: float = 0.04
     safe_clearance: float = 0.02  # 手と隣の物体の、上から見た隙間がこれ以上あれば当たらないとみなす
     yaw_step: float = math.radians(15.0)  # 円柱で試す手先の向きの刻み（基準から ±90°）
+    # 指の開き（左右の指の関節の値の和 [m]）で、掴めたかどうかを判定する（judge_grip。#27）
+    grip_closed_max: float = 0.01  # これより狭ければ、指が閉じきった（何も挟んでいない）
+    grip_under_tol: float = 0.015  # 物体の掴む幅よりこれ以上狭ければ、物体の端をつまんでいる
+    grip_over_tol: float = 0.01  # 物体の掴む幅よりこれ以上広ければ、指が閉じきらない（指先が物体の上に乗った、など）
+    grip_hold_time: float = 0.1  # 運んでいる間、この時間続けて掴めていなければ落としたとみなす
 
 
 @dataclass(frozen=True)
@@ -230,6 +235,46 @@ class FingerSettle:
             for j in range(len(positions))
         )
         return closed and still
+
+
+def judge_grip(opening: float, grasp_width: float, params: GraspParams) -> str | None:
+    """指の開き opening [m]（左右の指の関節の値の和）から、物体（掴む幅 grasp_width）を掴めているかを判定する。
+
+    掴めていれば None、掴めていなければ理由。実機と同じく、ロボット自身の指の関節の値だけで判定する（#27）。
+    """
+    if opening < params.grip_closed_max:
+        return f"指が閉じきった（開き {opening * 100:.1f}cm。何も挟んでいない）"
+    if opening > grasp_width + params.grip_over_tol:
+        return f"指の開き {opening * 100:.1f}cm が物体の幅 {grasp_width * 100:.1f}cm より広い（指が閉じきらない）"
+    if opening < grasp_width - params.grip_under_tol:
+        return f"指の開き {opening * 100:.1f}cm が物体の幅 {grasp_width * 100:.1f}cm より狭い（物体の端をつまんでいる）"
+    return None
+
+
+class GripMonitor:
+    """物を持って動く間の監視：指の開きで掴めていない状態が grip_hold_time 続いたら、失敗とみなす。
+
+    一度でも掴めていた後なら「落とした」、最初から掴めていなければ「掴めていない」（閉じた指が空振りした、など）。
+    """
+
+    def __init__(self, grasp_width: float, params: GraspParams) -> None:
+        self.grasp_width = grasp_width
+        self.params = params
+        self._bad_since: float | None = None
+        self._held = False
+
+    def update(self, t: float, opening: float) -> str | None:
+        """失敗とみなしたら理由を返す（それまでは None）。"""
+        reason = judge_grip(opening, self.grasp_width, self.params)
+        if reason is None:
+            self._bad_since = None
+            self._held = True
+            return None
+        if self._bad_since is None:
+            self._bad_since = t
+        if t - self._bad_since >= self.params.grip_hold_time - 1e-9:
+            return f"{'落とした' if self._held else '掴めていない'}：{reason}"
+        return None
 
 
 def move_toward(current: Sequence[float], target: Sequence[float], max_dist: float) -> tuple[float, float, float]:

@@ -3,6 +3,7 @@
 ※ SimulationApp を生成した後で import すること。
 - 掴んだ物体と手先の向きを覚えておき、置くときに使う（core の TidyTask は物体の向きだけを持つ）
 - 隣の物体は真値（SimWorld）から作る
+- 掴めたか・運ぶ途中で落としていないかは、指の開きで判定する（#27）。真値による判定は比較のために grip_checks に記録する
 - 姿勢の変更：待機姿勢（standby）は RMPflow で手先を動かす。撮影姿勢（photo）は関節の目標をなめらかに補間して動かす
 """
 
@@ -12,7 +13,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from restorebot.core.grasp import bearing_yaw, box_place_hand_yaw, footprints
+from restorebot.core.grasp import GRASP_OFFSET_Z, bearing_yaw, box_place_hand_yaw, footprints, judge_grip
 from restorebot.core.scene import SceneSpec
 from restorebot.core.types import ObjectState, Pose2D, Status, StepResult, WorldState
 from restorebot.sim import robot as rb
@@ -88,7 +89,8 @@ class SimRobot:
     ) -> None:
         """objects は隣の物体の位置を取る世界（推定版の EstimatedWorld など）。省略すると world（真値）。
 
-        world（真値）は、台車の位置（オドメトリに相当）と、掴めたかどうかの判定（物体の高さ）に使う。
+        world（真値）は、台車の位置（オドメトリに相当）に使う。掴めたかどうかは指の開きで判定し、真値の判定は
+        比較のために grip_checks（掴むたび・置く前ごとの記録）に残すだけ（#27）。
         """
         self.objects = objects or world
         self.scene = scene
@@ -98,6 +100,7 @@ class SimRobot:
         self._held: str | None = None
         self._hand_yaw: float | None = None
         self._object_yaw: float | None = None  # 掴んだときの物体の向き（箱の向きを戻すのに使う。#25）
+        self.grip_checks: list[dict] = []  # 指の開きによる判定と、真値による判定の記録（#27）
 
     def _neighbors(self, key: str):
         positions = {k: self.objects.object_state(k).position for k in self.scene.tidy if k != key}
@@ -116,6 +119,7 @@ class SimRobot:
             lambda: float(self.world.object_pose(obj.key)[0][2]),
             object_path(obj.key),
             self._neighbors(obj.key),
+            record=self.grip_checks.append,
         )
 
         def held():
@@ -138,7 +142,11 @@ class SimRobot:
         hand_yaw = self._hand_yaw
         if shape == "cube":
             hand_yaw = box_place_hand_yaw(self._hand_yaw, self._object_yaw, yaw, bearing_yaw(base, position[:2]))
-        action = place_action(self.ctx, shape, position, hand_yaw, base, object_path(key), self._neighbors(key))
+        width = self.scene.object(key).grasp_width
+        self._check_before_place(key, width)
+        action = place_action(
+            self.ctx, shape, position, hand_yaw, base, object_path(key), self._neighbors(key), grip_width=width
+        )
 
         def released():
             self._held = self._hand_yaw = self._object_yaw = None
@@ -154,3 +162,25 @@ class SimRobot:
 
     def holding(self) -> str | None:
         return self._held
+
+    def _check_before_place(self, key: str, width: float) -> None:
+        """置く前（運んだ後）に、まだ持っているかを指の開きと真値の両方で判定して記録する（比較のため）。
+
+        真値：物体の中心が指先の間（panda_hand から GRASP_OFFSET_Z 下）から 5cm 以内なら持っている。
+        """
+        art = self.sim.robot
+        q = art.get_dof_positions().numpy()[0]
+        opening = float(sum(q[i] for i in self.sim.dof_indices(rb.FINGER_JOINTS)))
+        hand = self.ctx.planning.tool_pose()[0]  # panda_hand（手先は真下向き）
+        grip_point = np.array([hand[0], hand[1], hand[2] - GRASP_OFFSET_Z])
+        dist = float(np.linalg.norm(np.asarray(self.world.object_pose(key)[0]) - grip_point))
+        self.grip_checks.append(
+            {
+                "phase": "before_place",
+                "key": key,
+                "opening_m": opening,
+                "grip_ok": judge_grip(opening, width, self.ctx.params) is None,
+                "truth_dist_m": dist,
+                "truth_ok": bool(dist < 0.05),
+            }
+        )
