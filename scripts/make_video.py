@@ -463,7 +463,8 @@ def main() -> int:
     marks = photo_marks(log, numbers)["current"]
     paste_fit(img, draw_marks(photo(args.run, "current"), marks), (40, 115, 680, 510))
     y = 125
-    for m in first_moves:
+    # 番号（片付けた順）の順に並べる（VLM が答えた順とは限らない）
+    for m in sorted(first_moves, key=lambda m: numbers.get(m["name"], 99)):
         no = numbers.get(m["name"])
         if no is None:
             continue

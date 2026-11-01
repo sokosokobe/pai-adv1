@@ -81,7 +81,8 @@ def main() -> int:
     crop_room(draw_marks(photo(args.run, "current"), marks["current"])).save(fig / "vlm.png")
     crop_room(draw_marks(photo(args.run, "after"), marks["after"])).save(fig / "verify.png")
     # 図：台車の位置の推定（#26 の確認用の画像）、報告の画面
-    shutil.copyfile(args.robot_pose, fig / "robot_pose.png")
+    rp = Image.open(args.robot_pose)
+    rp.crop((0, 30, rp.width, rp.height)).save(fig / "robot_pose.png")  # 上の確認用の文字を落とす
     shot = fig / "report_full.png"
     edge("--hide-scrollbars", "--window-size=1100,1500", f"--screenshot={shot.resolve()}",
          (args.run / "report.html").resolve().as_uri(), out=shot.resolve())  # fmt: skip
