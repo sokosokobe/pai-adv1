@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>写真 1 枚で「いつもの状態」に戻す片付けロボット</title>
+<style>
+  /* 1 ページずつ A4 の大きさの枠で組む（画面で見た通りに印刷される） */
+  @page { size: A4; margin: 0; }
+  :root { --ink:#1f1f23; --muted:#5d5d66; --line:#dcdce2; --accent:#0a6ebd; --soft:#eef4fa; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif; color: var(--ink);
+    font-size: 9.8pt; line-height: 1.75; word-break: auto-phrase; line-break: strict;
+    -webkit-print-color-adjust: exact; print-color-adjust: exact;
+  }
+  .page { width: 210mm; height: 297mm; padding: 12mm 15mm; overflow: hidden; break-after: page; position: relative; }
+  .page:last-child { break-after: auto; }
+  .pno { position: absolute; bottom: 5mm; right: 15mm; font-size: 8pt; color: var(--muted); }
+  h1 { font-size: 19pt; line-height: 1.35; margin: 0 0 1mm; }
+  .sub { color: var(--muted); font-size: 9pt; margin-bottom: 5mm; }
+  h2 { font-size: 13pt; margin: 5mm 0 2.2mm; padding-left: 2.5mm; border-left: 4px solid var(--accent); }
+  h2:first-child { margin-top: 0; }
+  p { margin: 0 0 2.2mm; }
+  .abstract { border: 1px solid #b9d3ea; background: var(--soft); border-radius: 2.5mm; padding: 3.5mm 5mm 3mm; margin-bottom: 2mm; }
+  .abstract .label { display: inline-block; background: var(--accent); color: #fff; font-weight: 700; font-size: 9pt;
+    border-radius: 1.2mm; padding: 0.3mm 2.5mm; margin-bottom: 1.5mm; }
+  .abstract p { font-size: 10pt; margin: 0; }
+  .flow { display: grid; grid-template-columns: repeat(6, 1fr); gap: 2mm; margin: 1mm 0 3.5mm; }
+  .flow div { background: var(--soft); border-radius: 1.8mm; padding: 2mm 2.2mm; font-size: 8.5pt; line-height: 1.5; }
+  .flow b { display: block; color: var(--accent); font-size: 9.3pt; margin-bottom: 0.5mm; }
+  .cards { display: grid; gap: 2.5mm; }
+  .c2 { grid-template-columns: repeat(2, 1fr); }
+  .card { border: 0.7px solid var(--line); border-radius: 2mm; padding: 2.5mm 3.5mm; }
+  .card h3 { font-size: 10pt; margin: 0 0 0.8mm; color: var(--accent); }
+  .card p { font-size: 9pt; margin: 0; line-height: 1.65; }
+  figure { margin: 0; }
+  figure img { width: 100%; border: 0.5px solid var(--line); border-radius: 1.5mm; display: block; }
+  figcaption { color: var(--muted); font-size: 8.4pt; margin-top: 1mm; line-height: 1.55; }
+  figcaption b { color: var(--ink); }
+  .figs { display: grid; gap: 4mm 4mm; margin: 2mm 0 2mm; }
+  .f2 { grid-template-columns: repeat(2, 1fr); }
+  table { border-collapse: collapse; width: 100%; font-size: 9pt; margin: 1.5mm 0 3mm; }
+  th, td { border-bottom: 0.6px solid var(--line); padding: 1.1mm 2.2mm; text-align: left; }
+  th { background: #f3f3f5; font-weight: 600; }
+  td.num, th.num { text-align: right; white-space: nowrap; }
+  ul { margin: 0; padding-left: 5mm; }
+  li { margin: 0.6mm 0; }
+</style>
+</head>
+<body>
+
+<!-- 1 ページ目：表題・概要・しくみ -->
+<section class="page">
+<h1>写真 1 枚で「いつもの状態」に戻す片付けロボット</h1>
+<div class="sub">Physical AI 応用講座 最終課題 ／ NVIDIA Isaac Sim 6.1・RidgebackFranka・Claude Sonnet 5.5</div>
+
+<div class="abstract">
+<span class="label">概要</span>
+<p>片付いた部屋の写真を 1 枚撮っておけば、散らかったときにロボットが元の状態に戻してくれる。そんな片付けロボットを、シミュレーション（NVIDIA Isaac Sim）の中に作りました。今の部屋の写真といつもの写真を VLM（Claude）が見比べて、どの物がどこへ動いたかを答えます。その答えをもとに、移動マニピュレータが机と棚の間を動き回って物を戻し、最後にもう一度部屋を確かめてから、結果を報告します。開発に使っていない 10 回の試行では、動かした 18 個の物をすべて元の場所に戻すことができました。</p>
+</div>
+
+<h2>1. しくみ</h2>
+<p>ロボットへの指示は、写真を見比べた結果から作ります。全体の流れは次の 6 段階です。</p>
+<div class="flow">
+  <div><b>① 教える</b>片付いた部屋を、天井のカメラで 1 枚撮っておく</div>
+  <div><b>② 見比べる</b>動いた物と、今の場所・戻し先を VLM が答える</div>
+  <div><b>③ 位置を求める</b>答えの点と深度から、物の位置と向きを 3 次元で求める</div>
+  <div><b>④ 戻す</b>近い物から順に、移動して掴み、運んで置く</div>
+  <div><b>⑤ 確かめる</b>もう一度見比べ、残った物があればやり直す</div>
+  <div><b>⑥ 報告する</b>写真と結果、報告文を 1 つの HTML にまとめる</div>
+</div>
+<p>部屋の広さは 4m × 3m で、机と低い棚の上に 5 個の物を置いています。物はコップやリモコンなどの日用品に見立てた、単色の円柱と直方体です。天井の中央には、真下を向いたカメラ（RGB と深度）を 1 台付けていて、部屋全体を 1 枚の写真に収められます。</p>
+<div class="figs f2">
+  <figure><img src="fig/scene.png"><figcaption>シミュレーションの部屋。奥が机、左手前（画面の外）が低い棚です。</figcaption></figure>
+  <figure><img src="fig/grasp.png"><figcaption>RidgebackFranka が棚の上の物を掴むところ。全方向に動ける台車に、7 軸のアームが載っています。</figcaption></figure>
+</div>
+<table>
+<tr><th style="width:17%">要素</th><th>使ったもの</th></tr>
+<tr><td>シミュレータ</td><td>NVIDIA Isaac Sim 6.1（Windows 11、RTX 5070）</td></tr>
+<tr><td>カメラ</td><td>天井の中央、高さ 2.6m に真下向き（RGB と深度、1280 × 960）</td></tr>
+<tr><td>VLM</td><td>Claude Sonnet 5.5。2 枚の写真と物の一覧を渡し、物の名前・場所・画像上の点を JSON で受け取る</td></tr>
+<tr><td>動作</td><td>アームは cuMotion の RMPflow、台車は格子地図上の経路探索（A*）と比例制御</td></tr>
+</table>
+<div class="pno">1</div>
+</section>
+
+<!-- 2 ページ目：使い方・動いている様子 -->
+<section class="page">
+<h2>2. 想定する使い方</h2>
+<p>「いつもの状態」は、部屋ごとに違います。写真 1 枚で教えられるので、次のような場所で、それぞれの部屋に合わせて使えると考えています。</p>
+<div class="cards c2">
+  <div class="card"><h3>会議室</h3><p>会議が終わった後に、机の上の備品をいつもの配置に戻しておきます。</p></div>
+  <div class="card"><h3>ホテル・旅館の客室</h3><p>清掃の後に備品の位置を確かめ、ずれていれば置き直します。報告は、そのまま確認の記録になります。</p></div>
+  <div class="card"><h3>家庭</h3><p>外出先から片付けを頼めます。物がいつも同じ場所に戻るので、探し物も減ります。</p></div>
+  <div class="card"><h3>店舗</h3><p>お客さんが手に取って乱れた棚を、陳列の写真どおりに戻します。</p></div>
+</div>
+
+<h2>3. 動いている様子</h2>
+<div class="figs f2">
+  <figure><img src="fig/vlm.png"><figcaption><b>② 見比べる</b>　Claude の答えを写真に重ねたものです。細い輪が今の位置、太い輪が戻し先を表します。この回は、約 10cm だけ動いた青い円柱を見逃しました。</figcaption></figure>
+  <figure><img src="fig/verify.png"><figcaption><b>⑤ 確かめる</b>　片付けた後にもう一度見比べたところ、見逃していた青い円柱（③）に気づき、戻し直しました。</figcaption></figure>
+  <figure><img src="fig/robot_pose.png"><figcaption><b>台車の位置を写真から求める</b>　台車の上面（緑）の外形に、長方形（黄）を当てはめます。アームに一部が隠れていても外形は求まり、オドメトリ（水色）とのずれは 1.4cm 以内でした。</figcaption></figure>
+  <figure><img src="fig/report.png"><figcaption><b>⑥ 報告する</b>　結果は 1 つの HTML ファイルで届きます。先頭に Claude が書いた報告文があり、その下に写真と物ごとの結果が並びます。</figcaption></figure>
+</div>
+<div class="pno">2</div>
+</section>
+
+<!-- 3 ページ目：工夫・評価 -->
+<section class="page">
+<h2>4. 工夫した点</h2>
+<div class="cards c2">
+  <div class="card"><h3>VLM の答えを 3 次元の目標にする</h3><p>VLM が答えるのは、画像の上の点だけです。そこで深度画像を使って点を 3 次元に直し、さらに物の中心の高さで計算するようにして、戻し先のずれを 1.5cm から 0.2cm まで小さくしました。</p></div>
+  <div class="card"><h3>シミュレータの正解の値に頼らない</h3><p>物の位置と向きは画像から、台車の位置は天井のカメラから、掴めたかどうかは指の開き具合から判断しています。実機でも手に入る情報だけで動くようにしました。</p></div>
+  <div class="card"><h3>片付けた後に確かめる</h3><p>VLM の答えは、毎回少しずつ揺らぎます。片付けた後にもう一度見比べることで、評価では最初に見逃した 1 個を拾い上げることができました。</p></div>
+  <div class="card"><h3>形に合わせて掴み、置く</h3><p>直方体はいつもの向きまで回して置き（ずれは最大 1.2°）、円柱は隣の物に手が当たらない向きで掴みます。置いた後は少し持ち上げてから手を離し、物を倒さないようにしました。</p></div>
+  <div class="card"><h3>失敗を再現して原因を突き止める</h3><p>失敗した回は、記録しておいた VLM の答えを再生して、同じ動きを再現しました。物の動きを追うことで、腕の反動で台車が揺れていたことなど、見えにくい原因を突き止めました。</p></div>
+  <div class="card"><h3>頼んだ人に伝わる報告</h3><p>写真と結果の表、Claude が書いた報告文を、1 つの HTML にまとめます。うまくいかなかった物も、記録にある範囲で正直に伝えます。</p></div>
+</div>
+
+<h2>5. 評価</h2>
+<p>開発中に使っていない 10 回の試行（動かす物は合計 18 個）で評価しました。VLM の誤りとロボットの失敗を切り分けるため、VLM の答えを正解の値から作った場合とも比べています。物が戻し先から 3cm 以内にあれば成功です。</p>
+<table>
+<tr><th>指標</th><th class="num">Claude</th><th class="num">正解の値から作った答え</th></tr>
+<tr><td>すべての物を戻せた試行</td><td class="num"><b>10 / 10</b></td><td class="num">10 / 10</td></tr>
+<tr><td>戻せた物（戻し先から 3cm 以内）</td><td class="num"><b>18 / 18</b></td><td class="num">18 / 18</td></tr>
+<tr><td>戻し先からのずれ（平均・最大）</td><td class="num">4.8mm・10.7mm</td><td class="num">4.0mm・8.9mm</td></tr>
+<tr><td>直方体の向きのずれ（最大）</td><td class="num">1.2°</td><td class="num">1.3°</td></tr>
+<tr><td>最初の見比べで見逃した物</td><td class="num">1（確認で回収）</td><td class="num">0</td></tr>
+<tr><td>VLM の費用（1 回あたり）</td><td class="num">約 $0.02</td><td class="num">―</td></tr>
+</table>
+<ul>
+<li>Claude が見逃したのは、机の上で 10cm ほどしか動いていない物でした。少しだけ動いた物は見逃しやすいようです。</li>
+<li>指が物を挟んでいるのに「閉じ終わった」と判定できず、掴み直したことが 1 回ありました（2 回目で成功）。試行は 10 回と少ないので、成功率は「この条件ではほとんど失敗しない」程度に受け取るのが妥当です。</li>
+</ul>
+<h2>6. 実用化に向けた課題</h2>
+<div class="cards c2">
+  <div class="card"><h3>天井のカメラ</h3><p>家庭ではプライバシーへの配慮が欠かせません。ロボット自身のカメラで、決まった位置から撮る方法も考えられます。</p></div>
+  <div class="card"><h3>指の力</h3><p>物を挟む力は約 36〜40N で、Franka Hand の把持力（連続 70N・最大 140N。販売店などの資料による）の範囲内です。摩擦は実機で未確認です。</p></div>
+  <div class="card"><h3>より複雑な部屋</h3><p>戻し先がふさがっている、物が重なっている、似た物がある、といった場面はまだ扱えていません。</p></div>
+  <div class="card"><h3>実機での確認</h3><p>評価はシミュレーションの中だけです。物を増やした評価と、実機での確認が次の課題です。</p></div>
+</div>
+<div class="pno">3</div>
+</section>
+
+</body>
+</html>
