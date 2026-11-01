@@ -1,4 +1,4 @@
-"""動画の記録の計算（設計書 12 章）：撮影用カメラの視点、画像を保存する間隔、ffmpeg のコマンド。
+"""動画の記録の計算（設計書 12 章）：撮影用カメラの視点、画像を保存する間隔、ffmpeg のコマンド、字幕。
 
 #6 の scripts/experiments/video_common.py から移した。headless で連番画像を保存し、ffmpeg（libx264）で mp4 にする。
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from restorebot.core.types import Pose2D
 
@@ -65,3 +66,63 @@ def hstack_command(inputs: Sequence[str], output: str, *, quality: int = 18) -> 
     cmd += ["-c:v", "libx264", "-crf", str(quality), "-preset", "medium", "-pix_fmt", "yuv420p"]
     cmd += ["-movflags", "+faststart", output]
     return cmd
+
+
+@dataclass(frozen=True)
+class Caption:
+    t0: float  # シミュレーションの時刻 [s]（撮影用のカメラの動画の時刻と同じ）
+    t1: float
+    text: str
+
+
+def episode_captions(log: dict, scene) -> list[Caption]:
+    """1 回の実行の記録（log.json）から、動画の字幕（いつ何をしているか）を作る（#20）。字幕は途切れずにつながる。
+
+    今の写真と見比べる → タスクごと（物体：取る場所 → 置く場所）→ 片付けた後の確認 → やり直し → やり直した後の写真。
+    """
+    end = log["sim_time_s"]
+    verify_t = next((e["t"] for e in log["events"] if e["kind"] == "verify"), None)
+    caps: list[Caption] = []
+    t = 0.0
+
+    def add(t1: float, text: str) -> None:
+        nonlocal t
+        if t1 > t:
+            caps.append(Caption(t, t1, text))
+            t = t1
+
+    def where(p) -> str:
+        s = scene.surface_at(p[:2])
+        return "?" if s is None else s.label
+
+    tasks = sorted(log["tasks"], key=lambda r: r["started_s"])
+    first = tasks[0]["started_s"] if tasks else (verify_t if verify_t is not None else end)
+    add(first, "今の写真を撮り、いつもの写真と見比べる")
+    n = 0
+    retried = False
+    for r in tasks:
+        name = scene.object(r["key"]).name
+        if r.get("round", 1) == 2 and not retried:
+            add(r["started_s"], "片付けた後の写真で、もう一度見比べる")
+            retried = True
+        if r.get("round", 1) == 2:
+            prefix = "やり直し："
+        else:
+            n += 1
+            prefix = f"{n}. "
+        text = f"{prefix}{name}：{where(r['pick_position'])} → {where(r['place_position'])}"
+        if scene.object(r["key"]).shape == "cube":
+            text += "（向きも戻す）"
+        if r["status"] != "succeeded":
+            text += "（失敗）"
+        if caps and t < r["started_s"]:  # タスクの間のすき間は、前の字幕を伸ばして埋める
+            caps[-1] = Caption(caps[-1].t0, r["started_s"], caps[-1].text)
+            t = r["started_s"]
+        add(r["started_s"] + r["duration_s"], text)
+    if retried:
+        add(end, "やり直した後の写真を撮る")
+    elif verify_t is not None:
+        add(end, "片付けた後の写真で、もう一度見比べる（残りなし）")
+    else:
+        add(end, "片付けた後の写真を撮る")
+    return caps
