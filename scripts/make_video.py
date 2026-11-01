@@ -406,12 +406,12 @@ def main() -> int:
     bg = first_frame(args.run / "overview.mp4", 1.0, parts / "frame0.png")
     bg = Image.blend(bg, Image.new("RGB", bg.size, (0, 0, 0)), 0.55)
     d = ImageDraw.Draw(bg)
-    d.text((W / 2, 270), "写真 1 枚で「いつもの状態」を教えると、", font=font(46, True), fill="white", anchor="mm")
-    d.text((W / 2, 340), "ロボットが部屋を元に戻す", font=font(58, True), fill="white", anchor="mm")
+    d.text((W / 2, 270), "写真 1 枚で「いつもの状態」に戻す", font=font(50, True), fill="white", anchor="mm")
+    d.text((W / 2, 345), "片付けロボット", font=font(62, True), fill="white", anchor="mm")
     d.text((W / 2, 440), "Physical AI 応用講座 最終課題", font=font(28), fill=(220, 220, 220), anchor="mm")
     sub = "NVIDIA Isaac Sim 6.1 ／ RidgebackFranka ／ Claude Sonnet 5.5"
     d.text((W / 2, 485), sub, font=font(24), fill=(220, 220, 220), anchor="mm")
-    clips.still(bg, 5, "01_title", "写真1枚で、いつもの状態を教えると、ロボットが部屋を元に戻します。")
+    clips.still(bg, 5, "01_title", "写真1枚で、いつもの状態に戻す、片付けロボットです。")
 
     # 2. 使い方
     img, d = canvas("使い方")
@@ -635,7 +635,7 @@ def main() -> int:
 
     # 12. 終わり
     img, d = canvas()
-    d.text((W / 2, 290), "写真 1 枚で、いつもの状態に戻す", font=font(48, True), fill=INK, anchor="mm")
+    d.text((W / 2, 290), "写真 1 枚で「いつもの状態」に戻す片付けロボット", font=font(44, True), fill=INK, anchor="mm")
     lines = [
         f"ロボットが動く場面は {SPEED} 倍速で再生しています",
         "VLM の答えは、評価の実行で Claude が答えたものを記録して再生しています",
