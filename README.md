@@ -1,9 +1,12 @@
-# いつもの状態に戻すロボット（仮称）
+# 写真1枚で「いつもの状態」に戻す片付けロボット
 
-写真1枚で「いつもの状態」を教えておくと、散らかった部屋や会議室を、移動しながら元の状態に戻してくれるロボットのデモです。
-Physical AI 応用講座の最終課題として、NVIDIA Isaac Sim 上で開発しています。
+写真1枚で「いつもの状態」を教えておくと、散らかった部屋を、移動しながら元の状態に戻してくれるロボットのデモです。
+Physical AI 応用講座の最終課題として、NVIDIA Isaac Sim 上で開発しました。
 
-> **ステータス**：M3（機能の追加と評価）の実装中。M1（停止状態でのタスク）・M2（移動を含むタスク）は完了（`scripts/run_episode.py --milestone m1|m2`）。M0（技術検証）の結果は [docs/experiments/M0_summary.md](docs/experiments/M0_summary.md)、設計書は [docs/design.md](docs/design.md)
+> **ステータス**：完了・提出済み（2026-11-02）。M0〜M4 のすべてのマイルストーンを終えました。
+>
+> - **デモ動画**：https://youtu.be/XPCNCzld2SQ
+> - **評価の結果**：[docs/evaluation.md](docs/evaluation.md) ／ **設計書**：[docs/design.md](docs/design.md) ／ **M0（技術検証）のまとめ**：[docs/experiments/M0_summary.md](docs/experiments/M0_summary.md)
 
 ---
 
@@ -14,7 +17,7 @@ Physical AI 応用講座の最終課題として、NVIDIA Isaac Sim 上で開発
 本リポジトリは、Physical AI 応用講座の最終課題の提出物です。課題の要点は次のとおりです（詳細は講座の公式資料を参照してください）。
 
 - AI を活用してロボットにタスクを実行させ、その様子を動画にまとめる（AI は推論のみの利用でも可）
-- 提出物は、タスクを実行する動画（1〜5分）、コード一式、取り組みをまとめたレポート
+- 提出物は、タスクを実行する動画（1〜3分）、コード一式、取り組みをまとめたレポート（PDF）
 - 評価の観点は、アイデアの独自性、技術的な難しさ、現実世界での実用性、動画と説明のわかりやすさ
 - 提出期限は 2026年11月2日
 
@@ -51,6 +54,30 @@ Physical AI 応用講座の最終課題として、NVIDIA Isaac Sim 上で開発
 
 ---
 
+## 結果
+
+開発に使っていない 10 エピソード（シード 100〜109、動かした物は計 18 個）で評価しました。VLM は Claude Sonnet 5.5、物体の位置は画像から推定し、片付けた後の確認とやり直しを含みます。詳細は [docs/evaluation.md](docs/evaluation.md) を参照してください。
+
+| 指標 | 結果 |
+|---|---|
+| すべての物を戻せたエピソード | 10 / 10 |
+| 戻せた物（戻し先から水平 3cm 以内） | 18 / 18 |
+| 戻し先からのずれ（平均・最大） | 4.8mm・10.7mm |
+| 箱の向きのずれ（最大） | 1.2° |
+| VLM の検出（最初の比較。適合率・再現率） | 1.00・0.94（見逃し 1 件は、確認とやり直しで回収） |
+| VLM の費用 | 1 エピソードあたり約 $0.02 |
+
+### 実装した主な機能
+
+- **見比べる**：いつもの写真と今の写真を VLM に渡し、動いた物・今の位置・戻し先（名前・場所の言葉・画像上の点）を JSON で受け取る。点は深度画像で 3 次元に直す
+- **画像からの推定**：物体の位置と向き（箱）を、今の写真と VLM の答えから推定する。シミュレータの真値は使わない
+- **移動と把持**：家具に寄せる止め位置の計算と経路計画、隣の物体を避ける手先の向き、箱はいつもの向きに戻して置く
+- **確認とやり直し**：片付けた後にもう一度見比べ、戻っていない物を 1 回だけやり直す
+- **報告**：写真・物ごとの結果・Claude が書いた報告文を 1 つの HTML ファイル（`report.html`）にまとめる
+- **真値に頼らない判定**：台車の位置を天井カメラの写真から推定してオドメトリと比べる。掴めたかどうかを指の開きで判定する
+
+---
+
 ## システム構成
 
 判断が必要な部分だけを AI（VLM）が担い、実行は古典的な手法で確実に行う、階層型の構成です。
@@ -84,7 +111,7 @@ M0（技術検証）で決めた主な構成は次のとおりです（詳細は
 
 ## 開発ロードマップ
 
-段階的に機能を積み上げます（予定。検証結果に応じて見直します）。M1・M2 が予定より早く終わったので（10/25）、片付け後の確認とやり直し、画像からの位置推定、報告の画面を M3 に加えました。会議室の場面と安全性の機能（人を避けるなど）は見送ります。
+段階的に機能を積み上げました。M1・M2 が予定より早く終わったので（10/25）、片付け後の確認とやり直し、画像からの位置推定、箱の向きを戻す機能、報告の画面、台車の位置の推定、指の開きによる把持の判定を M3 に加えました。会議室の場面と安全性の機能（人を避けるなど）は見送りました。
 
 | マイルストーン | 内容 | 目安 |
 |---|---|---|
@@ -92,10 +119,10 @@ M0（技術検証）で決めた主な構成は次のとおりです（詳細は
 | 設計 | 片付けの対象物と部屋の決定、ロボットの写り込みへの対策、設計書（[docs/design.md](docs/design.md)）と計画 | 〜10/25（当初 10/14） |
 | M1 停止状態でのタスク | 台車を止めたまま、VLM が差分を見つけて物を元に戻す（物体の位置はシミュレータの真値を使用）。合格ラインの動画 | 〜10/27（10/25 完了） |
 | M2 移動を含むタスク | 部屋の中を移動しながら複数の物を元に戻す（真値を使用）。家具・物体から距離をとる経路計画 | 〜10/30（10/25 完了） |
-| M3 機能の追加と評価 | 片付け後の確認とやり直し、画像からの物体の位置・向きの推定、箱の向きを戻す、報告の画面。決まったシードでの繰り返し試行による定量評価 | 〜10/31 |
-| M4 動画とレポート | 提出動画の編集、レポートの作成（締切 11/2 10:00） | 〜11/1 |
+| M3 機能の追加と評価 | 片付け後の確認とやり直し、画像からの物体の位置・向きの推定、箱の向きを戻す、報告の画面、台車の位置の推定、指の開きによる把持の判定。決まったシードでの繰り返し試行による定量評価 | 〜10/31（10/31 完了） |
+| M4 動画とレポート | 提出動画の編集、レポートの作成（締切 11/2 10:00） | 〜11/1（11/2 提出） |
 
-進捗は GitHub の Issues と Milestones で管理しています。
+進捗は GitHub の Issues と Milestones で管理しました。
 
 ---
 
@@ -159,7 +186,20 @@ GEMINI_API_KEY=...   # 代わりの候補（Gemini Robotics-ER 2）を使う場�
 
 # 全チェック（上記＋Isaac Sim を使う統合テスト）
 .\scripts\check.ps1 -Sim
+
+# 1 回の片付け（M2：移動あり、画像から推定、Claude を使う、動画と報告の画面も作る）
+.venv\Scripts\python.exe scripts\run_episode.py --milestone m2 --seed 104 --perception estimated --vlm claude --record --report
+
+# 定量評価（シードごとに別のプロセスで実行して集計）
+.venv\Scripts\python.exe scripts\run_eval.py --vlm claude --seeds 100-109 --out outputs\m3_18\claude --report
+
+# 保存済みの実行から、報告の画面・動画・レポートの PDF を作り直す（Isaac Sim は起動しない）
+.venv\Scripts\python.exe scripts\make_report.py outputs\m4_20\seed104 --writer claude
+.venv\Scripts\python.exe scripts\make_video.py --run outputs\m4_20\seed104 --eval outputs\m3_18\claude\summary.json --out outputs\m4_20\video
+.venv\Scripts\python.exe scripts\make_report_pdf.py --run outputs\m4_20\seed104 --out outputs\m4_21\report
 ```
+
+`--vlm truth` にすると、API を呼ばずにシミュレータの真値から VLM の答えを作ります。`--vlm replay --replay-log <log.json>` で、過去の実行の VLM の答えを再生できます。
 
 ---
 
@@ -170,8 +210,10 @@ GEMINI_API_KEY=...   # 代わりの候補（Gemini Robotics-ER 2）を使う場�
 ├── src/            # ソースコード（core: Isaac Sim 非依存のロジック / sim: Isaac Sim 依存の部分）
 ├── tests/          # テスト（tests/sim は Isaac Sim が必要）
 ├── scripts/        # 実行スクリプト
-├── docs/           # 設計書・検証記録
-│   ├── design.md       # 設計書（作成中）
+├── docs/           # 設計書・評価・検証記録
+│   ├── design.md       # 設計書
+│   ├── evaluation.md   # 定量評価の結果
+│   ├── report/         # レポートの本文（HTML。scripts/make_report_pdf.py で PDF にする）
 │   ├── env_check.md
 │   └── experiments/    # 検証記録（M0_summary.md が M0 のまとめ）
 └── outputs/        # 実行結果（Git 管理外）
@@ -192,5 +234,6 @@ GEMINI_API_KEY=...   # 代わりの候補（Gemini Robotics-ER 2）を使う場�
 - RidgebackFranka（Clearpath Robotics, BSD-3 License）：Isaac Sim のアセットサーバーから読み込んで使用しています
 - [Claude API](https://www.anthropic.com/api)（Anthropic）：VLM として使用しています
 - [FFmpeg](https://ffmpeg.org/)：動画の作成に使用しています
+- [VOICEVOX](https://voicevox.hiroshiba.jp/)：デモ動画のナレーション（VOICEVOX:ずんだもん）に使用しています
 
 NVIDIA のアセットは本リポジトリに含めていません。
