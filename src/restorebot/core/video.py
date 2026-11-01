@@ -75,8 +75,10 @@ class Caption:
     text: str
 
 
-def episode_captions(log: dict, scene) -> list[Caption]:
+def episode_captions(log: dict, scene, names: dict[str, str] | None = None) -> list[Caption]:
     """1 回の実行の記録（log.json）から、動画の字幕（いつ何をしているか）を作る（#20）。字幕は途切れずにつながる。
+
+    names：物体の key → 字幕に書く名前（省略時は物体の表示名）。
 
     今の写真と見比べる → タスクごと（物体：取る場所 → 置く場所）→ 片付けた後の確認 → やり直し → やり直した後の写真。
     """
@@ -101,7 +103,7 @@ def episode_captions(log: dict, scene) -> list[Caption]:
     n = 0
     retried = False
     for r in tasks:
-        name = scene.object(r["key"]).name
+        name = (names or {}).get(r["key"], scene.object(r["key"]).name)
         if r.get("round", 1) == 2 and not retried:
             add(r["started_s"], "片付けた後の写真で、もう一度見比べる")
             retried = True

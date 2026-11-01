@@ -104,3 +104,12 @@ def test_episode_captions_without_retry():
     caps = episode_captions(log, HOME_V2)
     assert [c.text for c in caps][-1] == "片付けた後の写真を撮る"
     assert caps[-1].t1 == 30.0
+
+
+def test_episode_captions_use_given_names():
+    from restorebot.core.scene import HOME_V2
+    from restorebot.core.video import episode_captions
+
+    caps = episode_captions(_log_with_retry(), HOME_V2, {"remote": "黒い直方体"})
+    assert caps[1].text == "1. 黒い直方体：低い棚の上 → 机の上（向きも戻す）"
+    assert caps[2].text.startswith("2. 緑のスプレー缶")  # 与えなかった物体は表示名のまま
