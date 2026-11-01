@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<title>写真 1 枚で「いつもの状態」を教えると、ロボットが部屋を元に戻す</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 16mm 15mm; }
+  :root { --ink:#1d1d20; --muted:#5f5f66; --line:#d9d9de; --accent:#0a6ebd; --soft:#eef4fa; }
+  * { box-sizing: border-box; }
+  body { font-family: "Yu Gothic UI", "Yu Gothic", "Meiryo", sans-serif; color: var(--ink); font-size: 9.6pt; line-height: 1.75; margin: 0; }
+  h1 { font-size: 17pt; line-height: 1.4; margin: 0 0 2mm; }
+  .sub { color: var(--muted); font-size: 9.5pt; margin-bottom: 5mm; }
+  h2 { font-size: 12.5pt; border-bottom: 1.6px solid var(--accent); padding-bottom: 1mm; margin: 7mm 0 3mm; break-after: avoid; }
+  h3 { font-size: 10.5pt; margin: 4.5mm 0 1.5mm; break-after: avoid; }
+  p { margin: 0 0 2.2mm; }
+  ul, ol { margin: 0 0 2.5mm; padding-left: 5.5mm; }
+  li { margin: 0.4mm 0; }
+  .abstract { background: var(--soft); border-radius: 2mm; padding: 3.5mm 4.5mm; }
+  table { border-collapse: collapse; width: 100%; margin: 1.5mm 0 3mm; font-size: 8.8pt; break-inside: avoid; }
+  th, td { border-bottom: 0.6px solid var(--line); padding: 1.2mm 1.8mm; text-align: left; vertical-align: top; }
+  th { background: #f4f4f6; font-weight: 600; }
+  td.num { text-align: right; white-space: nowrap; }
+  figure { margin: 2mm 0 3.5mm; break-inside: avoid; }
+  figure img { width: 100%; border: 0.5px solid var(--line); border-radius: 1mm; display: block; }
+  figcaption { color: var(--muted); font-size: 8.4pt; margin-top: 1mm; line-height: 1.5; }
+  .row { display: flex; gap: 4mm; break-inside: avoid; }
+  .row > figure { flex: 1; }
+  .flow { display: flex; align-items: stretch; gap: 1.6mm; margin: 2mm 0 1mm; break-inside: avoid; }
+  .flow div { flex: 1; background: var(--soft); border: 0.6px solid #c5d8ea; border-radius: 1.5mm; padding: 1.8mm 1.6mm; font-size: 8.2pt; line-height: 1.45; }
+  .flow b { display: block; color: var(--accent); font-size: 8.8pt; margin-bottom: 0.6mm; }
+  .flow .arrow { flex: 0 0 auto; background: none; border: none; padding: 0; align-self: center; color: var(--accent); font-size: 11pt; }
+  .note { color: var(--muted); font-size: 8.6pt; }
+  .tag { display: inline-block; background: var(--accent); color: #fff; border-radius: 1mm; padding: 0 1.6mm; font-size: 7.8pt; margin-right: 1mm; }
+  .break { break-before: page; }
+  code { font-family: Consolas, monospace; font-size: 8.6pt; }
+</style>
+</head>
+<body>
+
+<h1>写真 1 枚で「いつもの状態」を教えると、<br>ロボットが部屋を元に戻す</h1>
+<div class="sub">Physical AI 応用講座 最終課題 ／ NVIDIA Isaac Sim 6.1・RidgebackFranka・Claude Sonnet 5.5</div>
+
+<div class="abstract">
+<p><b>概要</b>　片付いた部屋を天井のカメラで 1 枚撮っておくだけで、散らかった部屋を移動マニピュレータが「いつもの状態」に戻すシステムを、シミュレーション（NVIDIA Isaac Sim 6.1）上で作った。今の写真といつもの写真を VLM（Claude Sonnet 5.5）が見比べて、どの物がどこへ動いたかを答え、ロボット（RidgebackFranka：全方向に動く台車＋7 軸のアーム）が机と棚の間を移動して、物を掴んで戻す。片付けた後にはもう一度見比べて見逃しをやり直し、結果を頼んだ人への報告（HTML）にまとめる。</p>
+<p style="margin:0">開発に使っていない 10 エピソード（動かした物体 18 個）で評価し、<b>すべての物体を戻し先から平均 4.8mm（最大 10.7mm）で戻せた</b>（成功の基準は 3cm 以内）。物体と台車の位置、掴めたかどうかは、シミュレータの正解の値（真値）ではなく、画像と指の開きから判定している。VLM の費用は 1 エピソードあたり約 $0.02 だった。</p>
+</div>
+
+<h2>1. 背景と目的</h2>
+<p>「片付いた状態」は、部屋や人ごとに違う。会議室の机の配置、家庭でリモコンを置く場所、店の棚の並べ方は、それぞれの「いつもの状態」があり、ルールとして書き出すのは手間がかかる。そこで、<b>ルールを書く代わりに、いつもの状態の写真を 1 枚見せるだけで教えられる</b>ようにしたいと考えた。写真から「何がどこへ動いたか」を読み取る部分には、画像と言葉を同時に扱える VLM を使う。VLM は物の名前と場所を言葉で答えられるので、新しい物や部屋にも、学習し直さずに対応しやすい。</p>
+<p>この課題の目的は、(1) 写真 1 枚から片付けの指示を作り、(2) 移動マニピュレータが実際に物を戻し、(3) 結果を確かめて報告する、という一連の流れをシミュレーション上で動かし、どの程度確実に戻せるかを定量的に示すことである。</p>
+
+<h3>想定する使い方（ユースケース）</h3>
+<table>
+<tr><th style="width:22%">場面</th><th>使い方</th></tr>
+<tr><td>会議室</td><td>会議の後、机の上の備品（リモコン・ペン立てなど）を、いつもの配置に戻す。次に使う人がすぐ使える状態にする</td></tr>
+<tr><td>ホテル・旅館の客室</td><td>清掃の後に、備品が決まった場所にあるかを写真で確かめ、ずれていれば置き直す。確認の記録（報告）も残る</td></tr>
+<tr><td>家庭</td><td>外出先から片付けを頼む。高齢の家族の住まいで、物を定位置に戻して探し物を減らす</td></tr>
+<tr><td>店舗</td><td>棚の商品の乱れを、陳列の写真どおりに戻す</td></tr>
+</table>
+<p>いずれも「部屋ごとに違う、いつもの状態」に、プログラムを書かずに写真 1 枚で合わせられる点が利点になる。</p>
+
+<h2>2. システムの構成</h2>
+<div class="flow">
+  <div><b>① 教える</b>片付いた部屋を天井カメラで撮る（RGB＋深度）</div><div class="arrow">→</div>
+  <div><b>② 見比べる</b>今の写真と比べ、動いた物・場所・画像上の点を VLM が答える</div><div class="arrow">→</div>
+  <div><b>③ 推定する</b>点と深度から、物の 3 次元の位置・向きと戻し先を求める</div><div class="arrow">→</div>
+  <div><b>④ 動く</b>近い順に、移動 → 掴む → 運ぶ → 置く（箱は向きも戻す）</div><div class="arrow">→</div>
+  <div><b>⑤ 確かめる</b>片付けた後に再び見比べ、残った物を 1 回だけやり直す</div><div class="arrow">→</div>
+  <div><b>⑥ 報告する</b>写真・結果の表・VLM が書いた報告文を HTML にまとめる</div>
+</div>
+<p class="note">図 1　処理の流れ。①は最初に 1 回だけ。②〜⑥が「片付けて」と頼まれるたびの流れ。</p>
+
+<div class="row">
+<figure><img src="fig/scene.png"><figcaption>図 2　シミュレーションの部屋（4.0 × 3.0m）。机（天板 0.70m）、低い棚（0.45m）、物体 5 個（日用品に見立てた単色の円柱 3 個・直方体 2 個）。</figcaption></figure>
+<figure><img src="fig/grasp.png"><figcaption>図 3　RidgebackFranka が棚の上の直方体（リモコンに見立てた物）を掴む様子（追従カメラの映像）。</figcaption></figure>
+</div>
+
+<table>
+<tr><th style="width:20%">要素</th><th>内容</th></tr>
+<tr><td>シミュレータ</td><td>NVIDIA Isaac Sim 6.1（pip で導入、headless）。Windows 11、RTX 5070（12GB）</td></tr>
+<tr><td>ロボット</td><td>RidgebackFranka（Clearpath Ridgeback：全方向に動く台車 ＋ Franka Panda：7 軸のアーム・2 本指のハンド）</td></tr>
+<tr><td>カメラ</td><td>天井の中央、高さ 2.6m に真下向き（1280 × 960、RGB と深度）。部屋全体が 1 枚に写る</td></tr>
+<tr><td>VLM</td><td>Claude Sonnet 5.5（Anthropic API）。2 枚の画像と物体の一覧を渡し、構造化出力（JSON）で受け取る</td></tr>
+<tr><td>動作計画</td><td>アーム：cuMotion の RMPflow（衝突を避けながら手先を目標へ）。台車：5cm の格子地図上の A* と比例制御</td></tr>
+<tr><td>ソフトウェア</td><td>Python。Isaac Sim に依存しない部分（計画・幾何・VLM の解析・推定・評価）と、依存する部分（シーン・制御・センサー）を分け、前者は単体テスト 695 件で確かめた（Isaac Sim を使う統合テストは 5 件）</td></tr>
+</table>
+
+<h2>3. 処理の流れ</h2>
+<h3>3.1 見比べる：VLM の答えを 3 次元の目標に直す</h3>
+<p>いつもの写真と今の写真、物体の一覧（「赤いコップ」「黒いリモコン」など）を Claude に渡し、動いた物ごとに、名前・今の場所と戻し先の言葉（「右上の大きな机の上の右寄り」など）・画像上の点（今の位置と戻し先）を JSON で答えさせる。画像上の点はそのままでは 2 次元なので、天井カメラの深度画像を使って 3 次元に直す。戻し先は、いつもの写真で点の周りの深度から天板の高さを決め、物体の中心の高さで逆投影する（物体の上面の高さで逆投影すると 1.5〜1.8cm ずれたが、中心の高さにすると 0.1〜0.2cm になった）。</p>
+<div class="row">
+<figure><img src="fig/vlm.png"><figcaption>図 4　Claude の答えを今の写真に重ねたもの（細い輪＝今の位置、太い輪＝戻し先）。この例では、机の上で約 10cm だけ動いた青い円柱を、最初の比較では見逃している。</figcaption></figure>
+<figure><img src="fig/verify.png"><figcaption>図 5　片付けた後の確認。いつもの写真ともう一度比べ、見逃していた青い円柱（③）に気づいてやり直した。</figcaption></figure>
+</div>
+
+<h3>3.2 推定する：真値を使わない</h3>
+<p>シミュレーションでは物体やロボットの正確な位置（真値）を読めるが、実機では読めない。そこで、ロボットの動作の中の判断には真値を使わないようにした（真値は評価と記録だけに使う）。</p>
+<ul>
+<li><b>物体の位置と向き</b>：VLM が答えた点の近くで、深度が「天板＋物体の高さ」に近い画素の塊を切り出し、重心を位置、塊の長い方向（主成分分析）を箱の向きとした。VLM の点が数 px ずれても補正される。誤差は位置 1.6〜5.0mm、箱の向き 0〜1.7° だった。</li>
+<li><b>台車の位置と向き</b>：撮影のたびに、天井カメラの写真から台車の上面（高さ約 0.27m）の画素を取り出して長方形を当てはめ、オドメトリ（台車の関節の値）と比べる。撮影姿勢のアームが上面の内側を斜めに隠すため、重心と主成分分析では向きが 40° 近くずれた。<b>画素の凸包に面積が最小の長方形を当てはめる</b>ことで、アームに隠されても外形が分かり、オドメトリとの差は位置 1.4cm 以内・向き 0.1° 以内になった（図 6）。</li>
+<li><b>掴めたかどうか</b>：実機のロボットと同じく、指の開き（左右の指の関節の値の和）と物体の幅を比べて判定する。持ち上げ・運搬中も監視し、落としたら気づく。真値による判定（物体が持ち上がったか、指の間にあるか）と、確認に使った 167 回の判定すべてで一致した。</li>
+</ul>
+
+<h3>3.3 動く：移動・掴む・置く</h3>
+<ul>
+<li><b>運ぶ順番と止め位置</b>：今の台車の位置から近い順に運ぶ。物体を掴む・置く場所ごとに、家具の正面に台車の止め位置を計算し、家具・壁から距離をとった経路で移動する（物を持ったまま移動してよいことを事前の検証で確かめた）。</li>
+<li><b>掴む</b>：手先は真下向き。手首の向きは「台車から物体を見た方向」を基準にし、円柱は隣の物体に手が当たらない向きを 15° 刻みで選ぶ。箱は短い辺を掴む。</li>
+<li><b>置く</b>：箱は、掴んだときの向きと戻し先の向き（いつもの写真から推定）の差だけ手首を回して置き、<b>向きもいつもの向きに戻す</b>。円柱は向きを気にしない。置いた後は指を開いて 0.5 秒待ち、3cm だけ真上に上げてから退く（すぐ大きく上げると、細いペン立てが指に引っかかって倒れた）。</li>
+</ul>
+
+<h3>3.4 確かめる・報告する</h3>
+<p>片付けた後に撮った写真をもう一度いつもの写真と比べ、まだ戻っていない物（VLM の見逃し・置き損ね）だけを 1 回やり直す。最後に、写真（VLM の答えを番号で重ねたもの）・物体ごとの結果の表・費用と、記録をもとに Claude が書いた 2〜5 文の報告文を、1 つの HTML ファイルにまとめる（図 7）。報告にはロボットが知っていることだけを書き、真値は開発用の欄に分けた。</p>
+<div class="row">
+<figure><img src="fig/robot_pose.png"><figcaption>図 6　台車の位置の推定。緑＝台車の上面の画素、黄＝当てはめた長方形（太い辺が前）、水色＝オドメトリ。アームが上面を隠しても外形が求まる。</figcaption></figure>
+<figure><img src="fig/report.png"><figcaption>図 7　結果の報告（report.html）。先頭に Claude が書いた報告文、その下に写真と物体ごとの結果の表。</figcaption></figure>
+</div>
+
+<h2>4. 工夫した点</h2>
+<table>
+<tr><th style="width:24%">工夫</th><th>内容と効果</th></tr>
+<tr><td><span class="tag">独自性</span>写真 1 枚で教える</td><td>片付け方をルールで書かず、写真の比較だけで指示を作る。VLM の「点」を深度で 3 次元に直し、言葉の答えをロボットの目標に結びつけた</td></tr>
+<tr><td><span class="tag">実用性</span>真値を使わない</td><td>物体（画像）、台車（天井カメラ）、掴めたか（指の開き）を、実機でも得られる情報だけで判断する。シミュレーションの結果を実機に持っていきやすい</td></tr>
+<tr><td><span class="tag">実用性</span>確認とやり直し</td><td>VLM の答えは 1 回ごとに揺らぐ。片付けた後にもう一度比べることで、評価では見逃し 1 件を回収し、そのエピソードを失敗から成功にした</td></tr>
+<tr><td>箱の向きを戻す</td><td>形に応じて扱いを変える（箱は向きも戻し、円柱は戻さない）。評価では箱の向きのずれは最大 1.2°</td></tr>
+<tr><td>報告</td><td>頼んだ人が外出先でも結果を確かめられるよう、写真・結果・報告文を 1 ファイルにまとめた。失敗も、記録にある範囲で正直に書かせる</td></tr>
+<tr><td><span class="tag">技術</span>問題の切り分け</td><td>失敗した実行は、記録した VLM の応答を再生して同じ動きを再現し、物体の軌跡から原因を調べた。見つかった問題と対策は次のとおり</td></tr>
+</table>
+<ul>
+<li><b>台車の揺れ</b>：遠くへ腕を伸ばすと、反動で止まっている台車が 1.7〜2.7cm 揺れ、指でペン立てを押していた。止まっている間だけ台車の関節を硬く保持し、揺れを 3mm 以下にした。</li>
+<li><b>指の速度の値の振れ</b>：物を挟んで止まった指の関節の速度の値が ±0.2m/s ほど振れ続け、「閉じ終わった」と判定できずに時間切れになっていた。指の位置が 0.2 秒止まったことでも閉じ終わりとみなすようにした。</li>
+<li><b>GPU ドライバー</b>：ドライバーの自動更新の後、Isaac Sim がロボットの読み込み中に不定期に異常終了した（読み込みの成功は 10 回中 2 回）。元のバージョンに戻して解消し、手順書に記録した。</li>
+</ul>
+
+<h2 class="break">5. 評価</h2>
+<p>開発中に使ったシード（0〜7）は失敗を見つけるたびに直してきたので、評価には使っていないシード 100〜109 の 10 エピソードを使った。動かす物体は 1〜3 個（計 18 個）で、机と棚の両方を使う。本番の条件（Claude を使う）に加え、VLM の誤りとロボットの失敗を分けて見るため、VLM の答えを真値から作る条件でも同じシードを実行した。成功の基準は、物体が戻し先から水平 3cm 以内であること。</p>
+<table>
+<tr><th>指標</th><th class="num">本番（Claude）</th><th class="num">比べる条件（真値の VLM）</th></tr>
+<tr><td>エピソードの成功</td><td class="num"><b>10 / 10</b></td><td class="num">10 / 10</td></tr>
+<tr><td>物体の成功（戻し先から 3cm 以内）</td><td class="num"><b>18 / 18</b></td><td class="num">18 / 18</td></tr>
+<tr><td>戻し先からのずれ（平均・最大）</td><td class="num">4.8mm・10.7mm</td><td class="num">4.0mm・8.9mm</td></tr>
+<tr><td>箱の向きのずれ（最大）</td><td class="num">1.2°</td><td class="num">1.3°</td></tr>
+<tr><td>VLM の検出（最初の比較。適合率・再現率）</td><td class="num">1.00・0.94</td><td class="num">1.00・1.00</td></tr>
+<tr><td>確認の後にやり直した物体</td><td class="num">1</td><td class="num">0</td></tr>
+<tr><td>ロボットが動いた時間（平均）</td><td class="num">39 秒</td><td class="num">39 秒</td></tr>
+<tr><td>VLM の費用</td><td class="num">合計 $0.19（1 回 約 $0.02）</td><td class="num">―</td></tr>
+<tr><td>動かしていない物体の動き（最大）</td><td class="num">0.0mm</td><td class="num">0.0mm</td></tr>
+</table>
+<ul>
+<li><b>VLM の見逃し（1 件）</b>：机の上で約 10cm だけ動いた円柱を、最初の比較で Claude が答えなかった（図 4）。片付けた後の確認で気づき、やり直しで戻した（図 5）。確認とやり直しがなければ、このエピソードは失敗だった。少しだけ動いた物は見逃しやすいと考えられる。</li>
+<li><b>掴む動作の失敗（1 件）</b>：比べる条件で、指が物体を挟んでいるのに閉じ終わりと判定されず、時間切れになった。もう一度掴んで成功した。指の閉じ終わりの判定には、まだ成り立たない場合が残っている。</li>
+<li><b>ずれの大きさ</b>：Claude のときの方が平均 0.8mm 大きい。戻し先を VLM が答えた点から求めるため、点が数 px ずれると戻し先もずれると考えられる。基準（3cm）に比べて十分小さい。</li>
+<li><b>数の限界</b>：10 エピソードと少ないため、成功率 100% の 95% 信頼区間の下限は、物体で 82%、エピソードで 72% にとどまる。</li>
+</ul>
+
+<h2>6. 実用性の検討と限界</h2>
+<h3>6.1 実機に持っていくときの課題</h3>
+<ul>
+<li><b>天井カメラという前提</b>：部屋全体を真上から撮るカメラを 1 台使う。会議室や店舗では見守りカメラとして付けられる場合があるが、家庭ではプライバシーへの配慮が要る。代わりに、ロボット自身のカメラで決まった位置から撮る方法も考えられる。真下向きでない場合は、深度から 3 次元に直す計算を一般の向きに広げる必要がある。</li>
+<li><b>指の力の値</b>：アセットのままの指の設定（最大力 1200N）では物が掴めなかったので、指 1 本あたり最大力 40N・剛性 2000N/m に変えた。物体を挟んだときの力は約 36〜40N になる。実機の Franka Hand の把持力は、連続で 70N・最大 140N とされている（販売店などの公開資料による）ので、設定した力は実機の範囲内であり、現実的な値と考えている。ただし、物体と指の摩擦の値は実機で確かめていない。</li>
+<li><b>費用と時間</b>：VLM の費用は 1 回 約 $0.02、問い合わせの待ち時間は 1 回あたり数秒で、片付けを頼む用途には十分に小さい。ロボットが動く時間は物体 1 個あたり 10〜22 秒（平均 17 秒）だった。</li>
+</ul>
+<h3>6.2 限界と今後</h3>
+<ul>
+<li>場面が単純である：物体は 5 個で、色・形がはっきり違い、物どうしの隙間を 5cm 以上あけている。戻し先が他の物でふさがっている場合、物が重なっている・床に落ちている場合、似た物がある場合は扱っていない。</li>
+<li>シミュレーションだけで評価しており、実機では確かめていない。</li>
+<li>今後は、ふさがった戻し先の扱い（先にどける）、物の種類を増やした評価、ロボットのカメラだけで撮る方式、実機での確認に取り組みたい。</li>
+</ul>
+
+<h2>付録</h2>
+<ul>
+<li><b>動画</b>（約 2 分 20 秒）：シード 104 の実行。ロボットが動く場面は 2 倍速で再生している。VLM の答えは、評価の実行で Claude が答えたものを記録して再生した（同じ動きが再現されることを確かめた）。ナレーションは Windows の音声合成（Microsoft Haruka）。</li>
+<li><b>使ったもの</b>：NVIDIA Isaac Sim 6.1 と同梱のアセット（RidgebackFranka、アセットサーバーから参照）、cuMotion（RMPflow）、Anthropic API（Claude Sonnet 5.5）、ffmpeg。</li>
+<li><b>開発の進め方</b>：2026-10-01〜11-01。検証の Issue で分からない点を先に確かめてから設計書を書き、マイルストーン（M0 検証、M1 机の上だけ、M2 移動あり、M3 評価と追加機能、M4 動画・レポート）ごとに Issue（計 24 件）に分けて実装した。</li>
+</ul>
+
+</body>
+</html>
